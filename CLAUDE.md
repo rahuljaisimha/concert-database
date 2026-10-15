@@ -29,5 +29,7 @@ a change affects what they describe.
 ## Workflow
 
 - Every change goes through a pull request into `main`.
-- Before pushing: `.venv/bin/pytest`.
+- Before pushing: `.venv/bin/pytest`. After changing a source, also ask for a
+  `concertdb smoke-test` run on the crawler machine (this dev environment
+  can't reach the live sites).
 - Never commit `data/` or `.env`.

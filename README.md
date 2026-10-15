@@ -78,7 +78,13 @@ crawl continues where it stopped.
 ## Tests
 
 ```bash
-.venv/bin/pytest
+.venv/bin/pytest                 # every change: offline, under a second
+.venv/bin/concertdb smoke-test   # after changing a source: live, ~10 requests
 ```
 
-Offline and fast. Fixtures are in `tests/fixtures/` (see its README).
+`pytest` uses fixtures in `tests/fixtures/` (see its README). `smoke-test`
+makes a few real requests per source (setlist.fm for Flat Worms, Pollstar for
+Zebulon, optionally one page with `--page-url`) into a throwaway database
+under `data/smoke/`, prints PASS/FAIL per source, and never touches the real
+ledger or its daily budgets. Its saved responses in `data/smoke/raw/` make
+good new test fixtures.

@@ -7,7 +7,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from . import backup, db, export, ledger, seed, state, status
+from . import backup, db, export, ledger, seed, smoke, state, status
 from .http import Fetcher
 from .normalize import norm
 from .sources import jsonld, pollstar, setlistfm
@@ -173,6 +173,11 @@ def cmd_restore(args):
     backup.restore(Path(args.db), _data_dir(args))
 
 
+def cmd_smoke_test(args):
+    ok = smoke.run(_data_dir(args) / "smoke", args.graph, args.page_url)
+    sys.exit(0 if ok else 1)
+
+
 def _lock(args):
     """One crawler at a time: a scheduled run that overlaps a long one exits quietly."""
     path = Path(args.db).with_suffix(".lock")
@@ -262,6 +267,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--min-conf", type=float, default=0.4)
     s.add_argument("--graph-only", action="store_true", help="only artists in the MusicSceneMap graph")
     s.set_defaults(fn=cmd_export)
+
+    s = sub.add_parser("smoke-test", help="a few live requests per source into a throwaway database")
+    s.add_argument("--graph", default=seed.GRAPH_URL)
+    s.add_argument("--page-url", help="also test one venue calendar / event page")
+    s.set_defaults(fn=cmd_smoke_test)
 
     sub.add_parser("backup", help="snapshot (and upload to R2 if configured)").set_defaults(fn=cmd_backup)
     sub.add_parser("restore", help="restore the newest R2 snapshot").set_defaults(fn=cmd_restore)

@@ -72,3 +72,49 @@ def test_prioritize(conn, tmp_path):
         state.ensure(conn, "setlistfm", f"artist:{mbid}", priority=5)
     assert seed.prioritize(conn, ["flat worms", "Nobody"]) == ["Nobody"]
     assert state.due(conn, "setlistfm")[0]["key"] == "artist:g2"
+
+
+def test_smoke_run_with_fake_sources(tmp_path, monkeypatch):
+    import json
+
+    from concertdb import smoke
+    from concertdb.sources import pollstar, setlistfm
+    from conftest import fixture_text, ok
+
+    g = tmp_path / "graph.db"
+    gc = sqlite3.connect(g)
+    gc.executescript("CREATE TABLE nodes (id TEXT, name TEXT, type TEXT);"
+                     "CREATE TABLE edges (source TEXT, target TEXT, rel_type TEXT);")
+    gc.executemany("INSERT INTO nodes VALUES (?, ?, 'group')",
+                   [("5f647289-9ff8-494d-a349-7a388307ddde", "Flat Worms")] +
+                   [(f"x{i}", f"Band {i}") for i in range(1500)])
+    gc.commit()
+    gc.close()
+
+    calls = []
+
+    class FakeSetlist:
+        def __init__(self, *a):
+            pass
+
+        def page(self, kind, ident, page):
+            calls.append(ident)
+            return ok(fixture_text("setlistfm_venue_night.json"))
+
+    class FakePollstar:
+        def __init__(self, *a):
+            pass
+
+        def autocomplete(self, q):
+            return ok(fixture_text("pollstar_autocomplete_zebulon.json"))
+
+        def events(self, pid, page):
+            return ok(fixture_text("pollstar_events_zebulon.json"))
+
+    monkeypatch.setattr(setlistfm, "Client", FakeSetlist)
+    monkeypatch.setattr(pollstar, "Client", FakePollstar)
+    monkeypatch.setenv("SETLISTFM_API_KEY", "test")
+    assert smoke.run(tmp_path / "smoke", str(g), log=lambda *_: None)
+    assert calls[0] == "5f647289-9ff8-494d-a349-7a388307ddde"   # the test artist, not 1,500 others
+    assert "x1" not in calls
+    assert len(calls) <= smoke.SETLISTFM_REQUESTS
