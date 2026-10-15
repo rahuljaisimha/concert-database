@@ -1,0 +1,34 @@
+{
+  "type": "setlists", "itemsPerPage": 20, "page": 1, "total": 2,
+  "setlist": [
+    {
+      "id": "63a1b2c3", "versionId": "7b5e1a2", "eventDate": "12-04-2025",
+      "lastUpdated": "2025-04-13T08:12:44.000+0000",
+      "artist": {"mbid": "194272cc-dcc8-4640-a4a6-66da7d250d5c", "name": "Osees", "sortName": "Osees"},
+      "venue": {
+        "id": "4bd6cf2e", "name": "The Echo",
+        "city": {"id": "5368361", "name": "Los Angeles", "state": "California", "stateCode": "CA",
+                 "coords": {"lat": 34.052, "long": -118.244}, "country": {"code": "US", "name": "United States"}},
+        "url": "https://www.setlist.fm/venue/the-echo-los-angeles-ca-usa-4bd6cf2e.html"
+      },
+      "tour": {"name": "Spring Tour 2025"},
+      "sets": {"set": [
+        {"song": [{"name": "A"}, {"name": "B"}, {"name": "C"}, {"name": "D"}, {"name": "E"},
+                  {"name": "F"}, {"name": "G"}, {"name": "H"}, {"name": "I"}, {"name": "J"}]},
+        {"encore": 1, "song": [{"name": "K"}, {"name": "L"}]}
+      ]},
+      "url": "https://www.setlist.fm/setlist/osees/2025/the-echo-los-angeles-ca-63a1b2c3.html"
+    },
+    {
+      "id": "23c4d5e6", "versionId": "1a2b3c4", "eventDate": "30-03-2025",
+      "lastUpdated": "2025-03-31T10:00:00.000+0000",
+      "artist": {"mbid": "194272cc-dcc8-4640-a4a6-66da7d250d5c", "name": "Osees", "sortName": "Osees"},
+      "venue": {
+        "id": "53d6a7b1", "name": "Gonerfest Stage",
+        "city": {"id": "4641239", "name": "Memphis", "state": "Tennessee", "stateCode": "TN",
+                 "coords": {"lat": 35.149, "long": -90.048}, "country": {"code": "US", "name": "United States"}}
+      },
+      "sets": {"set": []}
+    }
+  ]
+}

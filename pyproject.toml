@@ -1,0 +1,23 @@
+[project]
+name = "concertdb"
+version = "0.1.0"
+description = "Ledger of concert bills (who opened for whom) for MusicSceneMap"
+requires-python = ">=3.10"
+dependencies = ["requests>=2.28", "beautifulsoup4>=4.11"]
+
+[project.optional-dependencies]
+r2 = ["boto3>=1.26"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+concertdb = "concertdb.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["concertdb*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

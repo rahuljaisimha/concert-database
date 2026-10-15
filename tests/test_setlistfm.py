@@ -1,0 +1,113 @@
+import json
+
+from concertdb import state
+from concertdb.sources import setlistfm
+from conftest import FLAT_WORMS, OSEES, FakeSetlistClient, add_graph_artist, fixture_text, ok, setlist_page, status
+
+
+def _sl(i, date="01-01-2024", mbid=OSEES, updated="2024-01-02T00:00:00.000+0000"):
+    return {"id": f"sl{i}", "eventDate": date, "lastUpdated": updated,
+            "artist": {"mbid": mbid, "name": "Osees"},
+            "venue": {"id": f"v{i}", "name": f"Venue {i}", "city": {"name": "LA"}},
+            "sets": {"set": []}}
+
+
+def test_parse_setlist():
+    data = json.loads(fixture_text("setlistfm_artist_page1.json"))
+    p = setlistfm.parse_setlist(data["setlist"][0])
+    assert p["date"] == "2025-04-12"
+    assert p["artist_mbid"] == OSEES
+    assert p["venue_name"] == "The Echo" and p["city"] == "Los Angeles"
+    assert p["song_count"] == 12
+    assert p["tour"] == "Spring Tour 2025"
+    assert p["lat"] == 34.052
+
+
+def test_same_night_infers_opener(conn):
+    add_graph_artist(conn, OSEES, "Osees")
+    add_graph_artist(conn, FLAT_WORMS, "Flat Worms")
+    for sl in json.loads(fixture_text("setlistfm_venue_night.json"))["setlist"]:
+        setlistfm.ingest_setlist(conn, setlistfm.parse_setlist(sl))
+    rows = {r["artist_id"]: r for r in conn.execute("SELECT * FROM billings")}
+    assert rows[OSEES]["role"] == "headliner"
+    assert rows[FLAT_WORMS]["role"] == "opener"
+    assert conn.execute("SELECT COUNT(*) FROM shows").fetchone()[0] == 1
+    # The venue was registered for a venue crawl.
+    assert state.get(conn, "setlistfm", "venue:4bd6cf2e") is not None
+
+
+def test_backfill_then_incremental(conn):
+    state.ensure(conn, "setlistfm", f"artist:{OSEES}", priority=5)
+    page1 = setlist_page([_sl(1), _sl(2)], total=3, per_page=2)
+    page2 = setlist_page([_sl(3)], total=3, page=2, per_page=2)
+    client = FakeSetlistClient({("artist", OSEES): [page1, page2]})
+
+    stats = setlistfm.crawl(conn, client, max_requests=10, log=lambda *_: None)
+    assert stats["new"] == 3
+    assert [c[2] for c in client.calls if c[0] == "artist"] == [1, 2]
+    row = state.get(conn, "setlistfm", f"artist:{OSEES}")
+    assert state.get_cursor(row) == {"backfill_done": True}
+    assert row["next_due"] > row["last_checked"]
+
+    # Next visit: page 1 has nothing new → one request, stop.
+    conn.execute("UPDATE crawl_state SET next_due = '2000-01-01' WHERE key = ?", (f"artist:{OSEES}",))
+    conn.execute("DELETE FROM crawl_state WHERE key LIKE 'venue:%'")
+    client.calls.clear()
+    stats = setlistfm.crawl(conn, client, max_requests=10, log=lambda *_: None)
+    assert client.calls == [("artist", OSEES, 1)]
+    assert stats["new"] == 0
+    assert state.get(conn, "setlistfm", f"artist:{OSEES}")["interval_days"] == 28  # doubled from 14
+
+
+def test_budget_exhausted_resumes_from_cursor(conn):
+    state.ensure(conn, "setlistfm", f"artist:{OSEES}")
+    pages = [setlist_page([_sl(i)], total=3, page=i, per_page=1) for i in (1, 2, 3)]
+    client = FakeSetlistClient({("artist", OSEES): pages})
+    setlistfm.crawl(conn, client, max_requests=1, log=lambda *_: None)
+    row = state.get(conn, "setlistfm", f"artist:{OSEES}")
+    assert state.get_cursor(row) == {"next_page": 2}
+    assert row["last_checked"] is None  # still due
+
+    conn.execute("DELETE FROM crawl_state WHERE key LIKE 'venue:%'")
+    client.calls.clear()
+    setlistfm.crawl(conn, client, max_requests=10, log=lambda *_: None)
+    assert [c[2] for c in client.calls if c[0] == "artist"] == [2, 3]
+    assert conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 3
+
+
+def test_not_found_is_postponed(conn):
+    state.ensure(conn, "setlistfm", "artist:unknown-mbid")
+    client = FakeSetlistClient({})
+    setlistfm.crawl(conn, client, max_requests=5, log=lambda *_: None)
+    row = state.get(conn, "setlistfm", "artist:unknown-mbid")
+    assert row["interval_days"] == setlistfm.NOT_FOUND_DAYS
+    assert len(client.calls) == 1
+
+
+def test_rate_limit_stops_run(conn):
+    state.ensure(conn, "setlistfm", "artist:a")
+    state.ensure(conn, "setlistfm", "artist:b")
+    client = FakeSetlistClient({("artist", "a"): [status(429)], ("artist", "b"): [status(429)]})
+    stats = setlistfm.crawl(conn, client, max_requests=50, log=lambda *_: None)
+    assert stats["requests"] == 1
+
+
+def test_daily_limit_respected(conn, monkeypatch):
+    monkeypatch.setattr(setlistfm, "DAILY_LIMIT", 2)
+    for k in "abc":
+        state.ensure(conn, "setlistfm", f"artist:{k}")
+    pages = {("artist", k): [setlist_page([_sl(k)])] for k in "abc"}
+    client = FakeSetlistClient(pages)
+    setlistfm.crawl(conn, client, max_requests=100, log=lambda *_: None)
+    assert len(client.calls) == 2
+    assert state.requests_today(conn, "setlistfm") == 2
+
+
+def test_updated_setlist_is_reingested(conn):
+    state.ensure(conn, "setlistfm", f"artist:{OSEES}")
+    client = FakeSetlistClient({("artist", OSEES): [setlist_page([_sl(1)])]})
+    setlistfm.crawl(conn, client, max_requests=5, log=lambda *_: None)
+    conn.execute("UPDATE crawl_state SET next_due = '2000-01-01'")
+    client.pages[("artist", OSEES)] = [setlist_page([_sl(1, updated="2024-05-05T00:00:00.000+0000")])]
+    stats = setlistfm.crawl(conn, client, max_requests=5, log=lambda *_: None)
+    assert stats["new"] == 1
