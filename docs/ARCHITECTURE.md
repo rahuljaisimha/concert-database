@@ -54,12 +54,31 @@ CHECK constraints, JSON is text, matching uses a `*_norm` column instead of
 `pgloader sqlite:///data/ledger.sqlite postgresql://...` should move it as-is.
 The raw archive lives outside the database, which keeps the database small.
 
+## Pollstar (`concertdb/sources/pollstar.py`)
+
+Pollstar only returns events from today onward, so its bills are lost unless
+saved before the show. MusicSceneMap queries it only when someone asks for
+concert recommendations; this crawler queries every venue the ledger knows
+about, on a schedule, with tight limits:
+
+- one request every 2 s, at most 300 a day
+- each venue's name is looked up once; the match (or the miss) is stored and
+  not asked again (misses are retried after a year)
+- event lists are rechecked every 3 days, backing off to 14 days when the
+  list is unchanged (hash over all pages); unchanged lists write nothing
+- any venue with a show in the last 3 years is queued for lookup, busiest first
+
 ## Roadmap
 
-1. **Pollstar capture**: upcoming shows with supporting acts for every venue
-   MusicSceneMap knows. Port of `MusicSceneMap/src/api/pollstar.ts`.
-2. **Wayback Machine**: monthly snapshots of watched venue calendars from
-   past years, parsed with the same schema.org parser.
+1. **Concert Archives** (concertarchives.org): fans log the shows they
+   attended, usually with the full lineup, which suits older and smaller
+   shows better than venue calendars. Before crawling, check its robots.txt
+   and terms, and ask about its "Data Requests & API" option for bulk
+   access. If crawling is allowed: by artist page, slowly, cached like
+   setlist.fm (full history once, then newest-first rechecks).
+2. **Wayback Machine**: archived venue calendars for past years, parsed with
+   the same schema.org parser. Complements Concert Archives for venues whose
+   calendars were archived but whose shows nobody logged.
 3. **Gap detection**: single-act shows, tour-routing gaps (a band in Phoenix
    on the 15th and Seattle on the 22nd probably played LA in between), and
    capture–recapture estimates of missing shows per artist.
@@ -67,4 +86,6 @@ The raw archive lives outside the database, which keeps the database small.
    date Z") answered from fetched pages; Haiku via the Batch API, cached by
    (page hash, prompt version), hard monthly $ cap from `usage`.
 5. **Bandsintown** past events, if an `app_id` is granted.
-6. **MusicSceneMap import**: load `opened_for.csv` into the graph build.
+6. **MusicSceneMap import**: load `opened_for.csv` into the graph build. The
+   ledger's saved Pollstar events could also serve MusicSceneMap's concert
+   recommendations, so it calls Pollstar less.

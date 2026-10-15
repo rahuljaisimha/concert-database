@@ -14,7 +14,8 @@ came from:
 | Manual entry | Shows you went to. Most trustworthy. | ✅ `concertdb add-show` |
 | setlist.fm API | Past shows by MusicBrainz ID; bills inferred when several acts have setlists for the same night | ✅ `concertdb crawl-setlistfm` |
 | schema.org event data | Venue calendars and ticketing pages (DICE, Eventbrite, Tixr, venue sites) with full bills | ✅ `concertdb capture-add` / `capture` |
-| Pollstar | Upcoming shows with supporting acts (same endpoints MusicSceneMap uses) | planned |
+| Pollstar | Upcoming shows with headliner/support flags, saved before they disappear (past dates aren't public) | ✅ `concertdb pollstar-add` / `pollstar` |
+| Concert Archives (concertarchives.org) | Fan-logged past shows with full lineups, often older and smaller shows | planned (checking terms first) |
 | Wayback Machine | Archived venue calendars for past years | planned |
 | Web search + Claude | Fills specific gaps (a known show with no opener listed) | planned |
 | Bandsintown | Past events with lineups (needs an `app_id`) | planned |
@@ -48,7 +49,11 @@ concertdb add-show --date 2026-09-17 --venue Zebulon --city "Los Angeles" \
 # Watch a venue calendar or ticketing page (rechecked automatically)
 concertdb capture-add https://dice.fm/venue/zebulon-...
 
-# One full cycle: watched pages, the day's setlist.fm budget, backup
+# Save a venue's upcoming Pollstar shows (venues already in the ledger are
+# looked up automatically; this is for adding one by hand)
+concertdb pollstar-add Zebulon --city "Los Angeles"
+
+# One full cycle: watched pages, Pollstar, the day's setlist.fm budget, backup
 concertdb run
 
 concertdb status                      # coverage and progress

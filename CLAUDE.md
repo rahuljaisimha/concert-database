@@ -14,7 +14,7 @@ a change affects what they describe.
 - `concertdb/infer.py` — headliner/opener from per-artist setlists (pure)
 - `concertdb/state.py` — crawl_state scheduling, backoff, usage budgets
 - `concertdb/http.py` — fetching, conditional requests, raw archive
-- `concertdb/sources/` — one module per source (setlistfm, jsonld, ...)
+- `concertdb/sources/` — one module per source (setlistfm, jsonld, pollstar)
 - `concertdb/seed.py`, `export.py`, `backup.py`, `status.py`, `cli.py`
 
 ## Rules

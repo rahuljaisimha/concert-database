@@ -11,7 +11,7 @@ from pathlib import Path
 from . import backup, db, export, ledger, seed, state, status
 from .http import Fetcher
 from .normalize import norm
-from .sources import jsonld, setlistfm
+from .sources import jsonld, pollstar, setlistfm
 
 
 def _conn(args):
@@ -108,6 +108,25 @@ def _setlistfm_client(args):
     return setlistfm.Client(Fetcher(_data_dir(args), min_interval=setlistfm.MIN_INTERVAL), key)
 
 
+def _pollstar_client(args):
+    return pollstar.Client(Fetcher(_data_dir(args), min_interval=pollstar.POLL_INTERVAL))
+
+
+def cmd_pollstar_add(args):
+    conn = _conn(args)
+    v = pollstar.add_venue(conn, _pollstar_client(args), args.venue, args.city)
+    conn.commit()
+    if v:
+        print(f"watching Pollstar venue {v['id']}: {v['name']}, {v['city']} {v['state'] or ''}")
+    else:
+        print("no confident match on Pollstar (try the venue's exact name)")
+
+
+def cmd_pollstar(args):
+    conn = _conn(args)
+    print(pollstar.capture(conn, _pollstar_client(args), max_requests=args.max_requests))
+
+
 def cmd_crawl_setlistfm(args):
     conn = _conn(args)
     stats = setlistfm.crawl(conn, _setlistfm_client(args), max_requests=args.max_requests)
@@ -115,10 +134,12 @@ def cmd_crawl_setlistfm(args):
 
 
 def cmd_run(args):
-    """One scheduled cycle: capture pages, crawl setlist.fm, back up. Safe to run often."""
+    """One scheduled cycle: watched pages, Pollstar, setlist.fm, backup. Safe to run often."""
     conn = _conn(args)
     print("== capture (schema.org pages)")
     print(jsonld.capture(conn, Fetcher(_data_dir(args), min_interval=1.0)))
+    print("== Pollstar (upcoming shows)")
+    print(pollstar.capture(conn, _pollstar_client(args), max_requests=args.pollstar_requests))
     if os.environ.get("SETLISTFM_API_KEY"):
         print("== setlist.fm")
         print(setlistfm.crawl(conn, _setlistfm_client(args), max_requests=args.setlistfm_requests))
@@ -208,12 +229,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--limit", type=int, default=200)
     s.set_defaults(fn=cmd_capture_run, locked=True)
 
+    s = sub.add_parser("pollstar-add", help="watch a venue's upcoming Pollstar events")
+    s.add_argument("venue")
+    s.add_argument("--city")
+    s.set_defaults(fn=cmd_pollstar_add, locked=True)
+
+    s = sub.add_parser("pollstar", help="fetch due Pollstar venue lists and lookups")
+    s.add_argument("--max-requests", type=int, default=pollstar.DAILY_LIMIT)
+    s.set_defaults(fn=cmd_pollstar, locked=True)
+
     s = sub.add_parser("crawl-setlistfm", help="spend setlist.fm requests on due artists/venues")
     s.add_argument("--max-requests", type=int, default=setlistfm.DAILY_LIMIT)
     s.set_defaults(fn=cmd_crawl_setlistfm, locked=True)
 
-    s = sub.add_parser("run", help="one scheduled cycle: capture, setlist.fm, backup")
+    s = sub.add_parser("run", help="one scheduled cycle: watched pages, Pollstar, setlist.fm, backup")
     s.add_argument("--setlistfm-requests", type=int, default=setlistfm.DAILY_LIMIT)
+    s.add_argument("--pollstar-requests", type=int, default=pollstar.DAILY_LIMIT)
     s.add_argument("--no-backup", action="store_true")
     s.set_defaults(fn=cmd_run, locked=True)
 

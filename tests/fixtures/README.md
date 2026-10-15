@@ -11,5 +11,8 @@ add a test.
   opener on the same night (opener's setlist filed under the headliner's tour).
 - `event_page.html` — an event page with a schema.org MusicEvent for the
   Iguana Death Cult / Flat Worms show at Zebulon, 2026-09-17.
+- `pollstar_autocomplete_zebulon.json`, `pollstar_events_zebulon.json` — Pollstar
+  autocomplete and venue-events responses, in the shape documented in
+  MusicSceneMap's `src/api/pollstar.ts`.
 - `calendar_page.html` — a venue calendar with several events in an
   `@graph`, one cancelled, one with a single performer and a "w/" title.
