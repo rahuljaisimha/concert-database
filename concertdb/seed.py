@@ -31,8 +31,34 @@ def _open_graph(path: Path) -> tuple[sqlite3.Connection, Path | None]:
     return sqlite3.connect(str(tmp)), tmp
 
 
+GRAPH_URL = "https://raw.githubusercontent.com/rahuljaisimha/MusicSceneMap/main/public/graph.db.gz"
+
+
+def _download(url: str) -> Path:
+    import requests
+
+    fd, name = tempfile.mkstemp(suffix=".db.gz")
+    with requests.get(url, stream=True, timeout=120) as r, open(fd, "wb") as f:
+        r.raise_for_status()
+        for chunk in r.iter_content(1 << 20):
+            f.write(chunk)
+    return Path(name)
+
+
 def seed_from_graph(conn: sqlite3.Connection, graph_path: str | Path) -> int:
-    g, tmp = _open_graph(Path(graph_path))
+    """graph_path: a local graph.db(.gz) or an http(s) URL to one."""
+    downloaded = None
+    if str(graph_path).startswith(("http://", "https://")):
+        downloaded = graph_path = _download(str(graph_path))
+    try:
+        return _seed(conn, Path(graph_path))
+    finally:
+        if downloaded:
+            downloaded.unlink(missing_ok=True)
+
+
+def _seed(conn: sqlite3.Connection, graph_path: Path) -> int:
+    g, tmp = _open_graph(graph_path)
     try:
         degree = dict(g.execute(
             f"SELECT id, COUNT(*) FROM (SELECT source AS id FROM edges WHERE rel_type IN {BAND_RELS}"

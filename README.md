@@ -32,8 +32,9 @@ python3 -m venv .venv
 cp .env.example .env        # add your setlist.fm key and R2 credentials
 set -a; . ./.env; set +a
 
-# Load every artist from MusicSceneMap's graph (~76k, a few seconds)
-.venv/bin/concertdb seed --graph ../MusicSceneMap/public/graph.db.gz
+# Load every artist from MusicSceneMap's graph (~76k, a few seconds;
+# downloads graph.db.gz from GitHub, or pass --graph <path>)
+.venv/bin/concertdb seed
 
 # Crawl the artists you care about first
 .venv/bin/concertdb prioritize "Osees" "Flat Worms" "Ty Segall"
@@ -61,8 +62,10 @@ concertdb shows "Flat Worms"          # what we know about an artist
 concertdb export --graph-only         # data/export/opened_for.csv for MusicSceneMap
 ```
 
-On the always-on machine, `deploy/concertdb.timer` runs `concertdb run` once a
-day (and catches up after the machine was off).
+On the always-on machine, a daily scheduled job runs `deploy/run.sh` (one
+`concertdb run`, logged to `data/run.log`) and catches up after the machine
+was off: Windows Task Scheduler via WSL (`deploy/windows-task.ps1`) or a
+systemd timer on Linux (`deploy/concertdb.timer`). See docs/HOSTING.md.
 
 ## Backups
 

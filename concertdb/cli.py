@@ -1,7 +1,6 @@
 """Command line: concertdb <command>. Run `concertdb -h` for the list."""
 
 import argparse
-import fcntl
 import json
 import os
 import sys
@@ -178,10 +177,15 @@ def _lock(args):
     """One crawler at a time: a scheduled run that overlaps a long one exits quietly."""
     path = Path(args.db).with_suffix(".lock")
     path.parent.mkdir(parents=True, exist_ok=True)
-    f = open(path, "w")
+    f = open(path, "a+")
     try:
-        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
         print("another concertdb run is in progress; exiting")
         sys.exit(0)
     return f
@@ -195,7 +199,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init", help="create the ledger").set_defaults(fn=cmd_init)
 
     s = sub.add_parser("seed", help="import artists from MusicSceneMap's graph.db(.gz)")
-    s.add_argument("--graph", required=True)
+    s.add_argument("--graph", default=seed.GRAPH_URL,
+                   help="path or URL to graph.db(.gz); default: MusicSceneMap's on GitHub")
     s.set_defaults(fn=cmd_seed, locked=True)
 
     s = sub.add_parser("prioritize", help="crawl these artists first (names or MBIDs)")
