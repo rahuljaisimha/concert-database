@@ -1,0 +1,27 @@
+{
+  "type": "setlists", "itemsPerPage": 20, "page": 1, "total": 2,
+  "setlist": [
+    {
+      "id": "63a1b2c3", "versionId": "7b5e1a2", "eventDate": "12-04-2025",
+      "lastUpdated": "2025-04-13T08:12:44.000+0000",
+      "artist": {"mbid": "194272cc-dcc8-4640-a4a6-66da7d250d5c", "name": "Osees"},
+      "venue": {"id": "4bd6cf2e", "name": "The Echo",
+        "city": {"name": "Los Angeles", "state": "California", "coords": {"lat": 34.052, "long": -118.244},
+                 "country": {"code": "US", "name": "United States"}}},
+      "tour": {"name": "Spring Tour 2025"},
+      "sets": {"set": [{"song": [{"name": "A"}, {"name": "B"}, {"name": "C"}, {"name": "D"}, {"name": "E"},
+                                 {"name": "F"}, {"name": "G"}, {"name": "H"}, {"name": "I"}, {"name": "J"}]},
+                       {"encore": 1, "song": [{"name": "K"}, {"name": "L"}]}]}
+    },
+    {
+      "id": "73f0e9d8", "versionId": "2c3d4e5", "eventDate": "12-04-2025",
+      "lastUpdated": "2025-04-14T09:00:00.000+0000",
+      "artist": {"mbid": "5f647289-9ff8-494d-a349-7a388307ddde", "name": "Flat Worms"},
+      "venue": {"id": "4bd6cf2e", "name": "The Echo",
+        "city": {"name": "Los Angeles", "state": "California", "coords": {"lat": 34.052, "long": -118.244},
+                 "country": {"code": "US", "name": "United States"}}},
+      "tour": {"name": "Osees Spring Tour 2025"},
+      "sets": {"set": [{"song": [{"name": "X"}, {"name": "Y"}, {"name": "Z"}, {"name": "W"}]}]}
+    }
+  ]
+}

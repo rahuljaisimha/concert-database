@@ -1,0 +1,10 @@
+{"totalPages": 1, "totalEvents": 3, "events": [
+  {"id": 88001, "name": "Iguana Death Cult", "playDate": "2026-09-17T00:00:00", "url": "https://www.pollstar.com/event/88001",
+   "isFestival": false, "venue": {"id": 501234, "name": "Zebulon"},
+   "artists": [{"name": "Iguana Death Cult", "isHeadline": true, "genres": ["Rock"]},
+               {"name": "Flat Worms", "isHeadline": false}]},
+  {"id": 88002, "name": "Doom Gong", "playDate": "2026-09-27T00:00:00", "isFestival": false,
+   "artists": [{"name": "Doom Gong"}]},
+  {"id": 88003, "name": "Two Act Night", "playDate": "2026-10-01T00:00:00", "isFestival": false,
+   "artists": [{"name": "First Listed"}, {"name": "Second Listed"}]}
+]}

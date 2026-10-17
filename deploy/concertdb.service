@@ -1,0 +1,21 @@
+# One crawl cycle (capture watched pages, spend the day's setlist.fm budget,
+# back up to R2). Started daily by concertdb.timer.
+#
+# Install (as your user, on the always-on machine):
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/concertdb.service deploy/concertdb.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now concertdb.timer
+#   loginctl enable-linger "$USER"     # keep user timers running when logged out
+[Unit]
+Description=concert-database crawl cycle
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/concert-database
+EnvironmentFile=%h/concert-database/.env
+ExecStart=%h/concert-database/.venv/bin/concertdb run
+Nice=10
+TimeoutStartSec=6h

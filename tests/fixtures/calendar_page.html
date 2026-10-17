@@ -1,0 +1,30 @@
+<!doctype html>
+<html><head>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {"@type": "MusicEvent", "name": "Doom Gong w/ Some Opener, Another Band",
+     "startDate": "2026-09-27T20:00",
+     "url": "https://example.com/event/doom-gong",
+     "location": {"@type": "Place", "name": "Zebulon",
+                  "address": {"addressLocality": "Los Angeles", "addressRegion": "CA", "addressCountry": "US"}},
+     "performer": {"@type": "MusicGroup", "name": "Doom Gong"}},
+    {"@type": "MusicEvent", "name": "Florence and the Machine (Sold Out)",
+     "startDate": "2026-10-02",
+     "url": "https://example.com/event/fatm",
+     "location": {"@type": "Place", "name": "Zebulon",
+                  "address": {"addressLocality": "Los Angeles"}},
+     "performer": [{"@type": "MusicGroup", "name": "Florence and the Machine"}]},
+    {"@type": "MusicEvent", "name": "Cancelled Band + Opener Band",
+     "startDate": "2026-10-05",
+     "eventStatus": "EventCancelled",
+     "url": "https://example.com/event/cancelled",
+     "location": {"@type": "Place", "name": "Zebulon",
+                  "address": {"addressLocality": "Los Angeles"}}},
+    {"@type": "Organization", "name": "Zebulon"}
+  ]
+}
+</script>
+<script type="application/ld+json">not json at all</script>
+</head><body></body></html>
