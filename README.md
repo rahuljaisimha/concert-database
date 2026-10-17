@@ -54,18 +54,25 @@ concertdb capture-add https://dice.fm/venue/zebulon-...
 # looked up automatically; this is for adding one by hand)
 concertdb pollstar-add Zebulon --city "Los Angeles"
 
-# One full cycle: watched pages, the day's setlist.fm budget, Pollstar, backup
+# One full cycle: watched pages, the day's setlist.fm budget, a little
+# Pollstar, backup
 concertdb run
+
+# Pollstar on its own: ~1 request/s until the day's budget (20,000 by default)
+# or the due work runs out. Runs next to `run`; `run` then skips Pollstar.
+concertdb pollstar
 
 concertdb status                      # coverage and progress
 concertdb shows "Flat Worms"          # what we know about an artist
 concertdb export --graph-only         # data/export/opened_for.csv for MusicSceneMap
 ```
 
-On the always-on machine, a daily scheduled job runs `deploy/run.sh` (one
-`concertdb run`, logged to `data/run.log`) and catches up after the machine
-was off: Windows Task Scheduler via WSL (`deploy/windows-task.ps1`) or a
-systemd timer on Linux (`deploy/concertdb.timer`). See docs/HOSTING.md.
+On the always-on machine, two daily scheduled jobs start at 4 am and catch up
+after the machine was off: `deploy/run.sh` (one `concertdb run`, logged to
+`data/run.log`) and `deploy/run-pollstar.sh` (the long Pollstar process,
+logged to `data/pollstar.log`). Windows Task Scheduler via WSL
+(`deploy/windows-task.ps1`) or systemd timers on Linux (`deploy/*.timer`).
+See docs/HOSTING.md.
 
 ## Backups
 

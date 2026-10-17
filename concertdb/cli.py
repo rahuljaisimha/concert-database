@@ -12,6 +12,10 @@ from .http import Fetcher
 from .normalize import norm
 from .sources import jsonld, pollstar, setlistfm
 
+# Pollstar requests spent inside `run` when no separate Pollstar process is
+# running (it keeps the daily run short; `concertdb pollstar` does the bulk).
+RUN_POLLSTAR_REQUESTS = 300
+
 
 def _conn(args):
     return db.connect(args.db)
@@ -45,6 +49,7 @@ def cmd_add_show(args):
     """Manual entry: the most trustworthy source there is."""
     conn = _conn(args)
     date.fromisoformat(args.date)  # validate
+    db.begin_write(conn)
     venue_id = ledger.get_or_create_venue(conn, args.venue, args.city, args.state, args.country)
     show_id = ledger.find_or_create_show(conn, args.date, venue_id)
     native = f"manual:{args.date}:{venue_id}"
@@ -133,7 +138,11 @@ def cmd_crawl_setlistfm(args):
 
 
 def cmd_run(args):
-    """One scheduled cycle: watched pages, setlist.fm, Pollstar, backup. Safe to run often."""
+    """One scheduled cycle: watched pages, setlist.fm, Pollstar, backup. Safe to run often.
+
+    Pollstar is skipped while a separate `concertdb pollstar` process is running
+    (it holds the Pollstar lock), so the two never crawl Pollstar at once.
+    """
     conn = _conn(args)
     print("== capture (schema.org pages)")
     print(jsonld.capture(conn, Fetcher(_data_dir(args), min_interval=1.0)))
@@ -143,8 +152,16 @@ def cmd_run(args):
     else:
         print("== setlist.fm skipped (no SETLISTFM_API_KEY)")
     # After setlist.fm, so venues it found today get their Pollstar lookup today.
-    print("== Pollstar (upcoming shows)")
-    print(pollstar.capture(conn, _pollstar_client(args), max_requests=args.pollstar_requests))
+    plock = None if args.pollstar_requests <= 0 else _lock(args, "pollstar", exit_if_busy=False)
+    if plock:
+        print("== Pollstar (upcoming shows)")
+        try:
+            print(pollstar.capture(conn, _pollstar_client(args), max_requests=args.pollstar_requests))
+        finally:
+            plock.close()
+    else:
+        print("== Pollstar skipped (" + ("--pollstar-requests 0" if args.pollstar_requests <= 0
+                                         else "the separate Pollstar process is running") + ")")
     if not args.no_backup:
         cmd_backup(args, conn)
 
@@ -179,9 +196,11 @@ def cmd_smoke_test(args):
     sys.exit(0 if ok else 1)
 
 
-def _lock(args):
-    """One crawler at a time: a scheduled run that overlaps a long one exits quietly."""
-    path = Path(args.db).with_suffix(".lock")
+def _lock(args, name: str, exit_if_busy: bool = True):
+    """One crawler per lock name at a time ("crawl": run, setlist.fm, pages, seed;
+    "pollstar": the Pollstar process). A scheduled run that overlaps a long one
+    exits quietly; with exit_if_busy=False, returns None instead."""
+    path = Path(args.db).with_name(f"{Path(args.db).stem}.{name}.lock")
     path.parent.mkdir(parents=True, exist_ok=True)
     f = open(path, "a+")
     try:
@@ -192,7 +211,10 @@ def _lock(args):
             import fcntl
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        print("another concertdb run is in progress; exiting")
+        f.close()
+        if not exit_if_busy:
+            return None
+        print(f"another concertdb {name} process is in progress; exiting")
         sys.exit(0)
     return f
 
@@ -207,7 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("seed", help="import artists from MusicSceneMap's graph.db(.gz)")
     s.add_argument("--graph", default=seed.GRAPH_URL,
                    help="path or URL to graph.db(.gz); default: MusicSceneMap's on GitHub")
-    s.set_defaults(fn=cmd_seed, locked=True)
+    s.set_defaults(fn=cmd_seed, locked="crawl")
 
     s = sub.add_parser("prioritize", help="crawl these artists first (names or MBIDs)")
     s.add_argument("artists", nargs="*")
@@ -238,26 +260,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("capture", help="recheck due watched pages")
     s.add_argument("--limit", type=int, default=200)
-    s.set_defaults(fn=cmd_capture_run, locked=True)
+    s.set_defaults(fn=cmd_capture_run, locked="crawl")
 
     s = sub.add_parser("pollstar-add", help="watch a venue's upcoming Pollstar events")
     s.add_argument("venue")
     s.add_argument("--city")
-    s.set_defaults(fn=cmd_pollstar_add, locked=True)
+    s.set_defaults(fn=cmd_pollstar_add, locked="pollstar")
 
-    s = sub.add_parser("pollstar", help="fetch due Pollstar venue lists and lookups")
+    s = sub.add_parser("pollstar", help="fetch due Pollstar venue lists and lookups (long-running;"
+                       " deploy/run-pollstar.sh runs it daily next to `run`)")
     s.add_argument("--max-requests", type=int, default=pollstar.DAILY_LIMIT)
-    s.set_defaults(fn=cmd_pollstar, locked=True)
+    s.set_defaults(fn=cmd_pollstar, locked="pollstar")
 
     s = sub.add_parser("crawl-setlistfm", help="spend setlist.fm requests on due artists/venues")
     s.add_argument("--max-requests", type=int, default=setlistfm.DAILY_LIMIT)
-    s.set_defaults(fn=cmd_crawl_setlistfm, locked=True)
+    s.set_defaults(fn=cmd_crawl_setlistfm, locked="crawl")
 
     s = sub.add_parser("run", help="one scheduled cycle: watched pages, setlist.fm, Pollstar, backup")
     s.add_argument("--setlistfm-requests", type=int, default=setlistfm.DAILY_LIMIT)
-    s.add_argument("--pollstar-requests", type=int, default=pollstar.DAILY_LIMIT)
+    s.add_argument("--pollstar-requests", type=int, default=RUN_POLLSTAR_REQUESTS,
+                   help="Pollstar budget inside `run` (0 = none); the separate `pollstar`"
+                        " process has its own, larger budget")
     s.add_argument("--no-backup", action="store_true")
-    s.set_defaults(fn=cmd_run, locked=True)
+    s.set_defaults(fn=cmd_run, locked="crawl")
 
     s = sub.add_parser("status", help="coverage and progress")
     s.add_argument("--json", action="store_true")
@@ -281,7 +306,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    lock = _lock(args) if getattr(args, "locked", False) else None
+    lock = _lock(args, args.locked) if getattr(args, "locked", None) else None
     try:
         args.fn(args)
     finally:

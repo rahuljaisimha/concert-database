@@ -53,8 +53,9 @@ later; `concertdb restore` makes the move a five-minute job.
 1. Raspberry Pi OS Lite (64-bit), boot from (or mount) the SSD.
 2. `sudo apt install python3-venv git`, then follow Setup in the README.
 3. Put `.env` in the repo directory (`chmod 600 .env`).
-4. Install the timer (instructions at the top of `deploy/concertdb.service`).
-5. `systemctl --user list-timers` to confirm; `journalctl --user -u concertdb` for logs.
+4. Install both timers (instructions at the top of `deploy/concertdb.service`
+   and `deploy/concertdb-pollstar.service`).
+5. `systemctl --user list-timers` to confirm; `journalctl --user -u concertdb -u concertdb-pollstar` for logs.
 
 ## Windows setup (WSL)
 
@@ -78,8 +79,13 @@ Windows Task Scheduler.
    deploy/run.sh && tail -30 data/run.log
    ```
 4. In normal PowerShell, from the repo folder (`\\wsl$\Ubuntu\home\<you>\concert-database`):
-   `.\deploy\windows-task.ps1`. It registers a daily 4 am task that also runs
-   when the PC comes back after missing 4 am.
+   `.\deploy\windows-task.ps1 -Distro Ubuntu` (the distribution's name from
+   `wsl -l -v`). It registers two daily 4 am tasks that also run when the PC
+   comes back after missing 4 am: `concert-database` (`deploy/run.sh`, about
+   an hour, log in `data/run.log`) and `concert-database-pollstar`
+   (`deploy/run-pollstar.sh`, Pollstar at ~1 request/s for several hours, log
+   in `data/pollstar.log`). They run side by side; see "Concurrency" in
+   docs/ARCHITECTURE.md.
 5. Power options: let the PC sleep if you like, but enable wake timers (or set
    it never to sleep); the task wakes it.
 

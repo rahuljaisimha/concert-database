@@ -16,7 +16,7 @@ from datetime import date
 
 from bs4 import BeautifulSoup
 
-from .. import ledger, state
+from .. import db, ledger, state
 from ..http import Fetcher
 
 SOURCE = "jsonld"
@@ -161,13 +161,16 @@ def capture(conn: sqlite3.Connection, fetcher: Fetcher, limit: int = 200, log=pr
     stats = {"pages": 0, "unchanged": 0, "events": 0}
     for row in state.due(conn, SOURCE, limit=limit):
         url = row["key"].split(":", 1)[1]
+        conn.commit()  # never hold the write lock across a request
         try:
             resp = fetcher.get(SOURCE, url, etag=row["etag"], last_modified=row["last_modified"])
         except Exception as exc:  # network errors: retry later
+            db.begin_write(conn)
             log(f"  {url}: {exc}")
             state.mark_failed(conn, SOURCE, row["key"])
             conn.commit()
             continue
+        db.begin_write(conn)
         stats["pages"] += 1
         state.record_usage(conn, SOURCE)
         if resp.not_modified or (resp.status == 200 and resp.content_hash == row["content_hash"]):

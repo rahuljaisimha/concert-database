@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the concert-database Pollstar capture once a day
+
+[Timer]
+OnCalendar=*-*-* 04:00
+RandomizedDelaySec=45m
+# If the machine was off at 04:00, run as soon as it's back on.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

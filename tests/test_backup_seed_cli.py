@@ -118,3 +118,25 @@ def test_smoke_run_with_fake_sources(tmp_path, monkeypatch):
     assert calls[0] == "5f647289-9ff8-494d-a349-7a388307ddde"   # the test artist, not 1,500 others
     assert "x1" not in calls
     assert len(calls) <= smoke.SETLISTFM_REQUESTS
+
+
+def test_locks_are_per_process_kind(tmp_path):
+    import argparse
+    args = argparse.Namespace(db=str(tmp_path / "ledger.sqlite"))
+    crawl = cli._lock(args, "crawl")
+    pollstar_lock = cli._lock(args, "pollstar", exit_if_busy=False)
+    assert pollstar_lock is not None                                # runs next to the daily crawl
+    assert cli._lock(args, "pollstar", exit_if_busy=False) is None  # but only one Pollstar process
+    pollstar_lock.close()
+    assert cli._lock(args, "pollstar", exit_if_busy=False) is not None
+    crawl.close()
+
+
+def test_run_skips_pollstar_while_its_process_runs(tmp_path, capsys, monkeypatch):
+    import argparse
+    monkeypatch.delenv("SETLISTFM_API_KEY", raising=False)
+    dbp = str(tmp_path / "ledger.sqlite")
+    held = cli._lock(argparse.Namespace(db=dbp), "pollstar")
+    cli.main(["--db", dbp, "run", "--no-backup"])
+    assert "Pollstar skipped (the separate Pollstar process is running)" in capsys.readouterr().out
+    held.close()

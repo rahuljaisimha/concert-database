@@ -9,6 +9,9 @@ before the show. Endpoints are the ones MusicSceneMap uses (src/api/pollstar.ts)
 
 Request discipline (Pollstar is a site, not an API we have a key for):
   - one request every POLL_INTERVAL seconds, at most DAILY_LIMIT per day
+    (POLLSTAR_INTERVAL / POLLSTAR_DAILY_LIMIT in .env)
+  - pushback (HTTP 403, 429, 503 or a network error) waits, slows down for the
+    rest of the run and retries; several in a row ends the run for the day
   - a venue's name is looked up once; the match (or no-match) is stored and
     never looked up again for a year
   - each venue's event list is rechecked every 3 days, backing off to 14 days
@@ -17,23 +20,40 @@ Request discipline (Pollstar is a site, not an API we have a key for):
 Units of work:
   pollstar / resolve:<our venue id>   find the venue's Pollstar id
   pollstar / venue:<pollstar id>      fetch its upcoming events
+
+`concertdb pollstar` runs this as its own long process next to the daily
+`concertdb run`; the transaction is committed before every request so the two
+processes can share the database (see db.begin_write).
 """
 
 import hashlib
 import json
 import os
 import sqlite3
+import time
 from datetime import date, timedelta
 
-from .. import ledger, state
+import requests
+
+from .. import db, ledger, state
 from ..http import Fetcher
 from ..normalize import norm
 
 SOURCE = "pollstar"
 AUTOCOMPLETE = "https://autocomplete.pollstar.com/global/All/100/{q}"
 EVENTS = "https://www.pollstar.com/api/companies/{id}/events"
-POLL_INTERVAL = 2.0
-DAILY_LIMIT = 300
+POLL_INTERVAL = float(os.environ.get("POLLSTAR_INTERVAL") or 1.0)        # seconds, start to start
+DAILY_LIMIT = int(os.environ.get("POLLSTAR_DAILY_LIMIT") or 20_000)
+MAX_INTERVAL = 10.0
+# Pollstar has no published limit, so treat these as "slow down": wait, slow to
+# 1.5x the interval for the rest of the run, retry. After len(BACKOFF_SECONDS)
+# in a row, stop for the day rather than risk the IP being blocked.
+PUSHBACK_STATUSES = (403, 429, 503)
+BACKOFF_SECONDS = (30, 60, 120, 300, 600)
+PAUSE_HOURS = 12            # after being stopped, no Pollstar requests from any process
+sleep = time.sleep          # replaced in tests
+DUE_BATCH = 200             # re-read what's due this often, so a long run sees new work
+REQUEUE_SECONDS = 1800      # look for newly found venues to resolve every 30 min
 PAGE_SIZE = 50
 MAX_PAGES = 10
 YEARS_AHEAD = 2
@@ -125,6 +145,10 @@ class Client:
         ua = user_agent()
         self.headers = {"Accept": "application/json", **({"User-Agent": ua} if ua else {})}
 
+    def slow_down(self) -> float:
+        self.fetcher.min_interval = min(MAX_INTERVAL, max(self.fetcher.min_interval, 1.0) * 1.5)
+        return self.fetcher.min_interval
+
     def autocomplete(self, query: str):
         from urllib.parse import quote
         return self.fetcher.get(SOURCE, AUTOCOMPLETE.format(q=quote(query, safe="")), headers=self.headers)
@@ -159,7 +183,9 @@ def queue_venues_to_resolve(conn: sqlite3.Connection) -> int:
 
 def add_venue(conn: sqlite3.Connection, client: Client, name: str, city: str | None) -> dict | None:
     """Look a venue up right away (CLI). Returns the Pollstar match or None."""
+    conn.commit()
     resp = client.autocomplete(name)
+    db.begin_write(conn)
     state.record_usage(conn, SOURCE)
     if resp.status != 200:
         return None
@@ -179,33 +205,101 @@ def _link(conn: sqlite3.Connection, v: dict, venue_id: int | None = None) -> int
     return venue_id
 
 
+def paused_until(conn: sqlite3.Connection) -> str | None:
+    """The pause end time (ISO, UTC) if Pollstar is paused now, else None."""
+    row = conn.execute("SELECT value FROM meta WHERE key = 'pollstar_paused_until'").fetchone()
+    if row and row["value"] > state._iso(state._now()):
+        return row["value"]
+    return None
+
+
+def pause(conn: sqlite3.Connection, hours: float) -> str:
+    until = state._iso(state._now() + timedelta(hours=hours))
+    db.begin_write(conn)
+    conn.execute("INSERT INTO meta (key, value) VALUES ('pollstar_paused_until', ?)"
+                 " ON CONFLICT (key) DO UPDATE SET value = excluded.value", (until,))
+    return until
+
+
+class Blocked(Exception):
+    """Pollstar pushed back several times in a row: stop for the day."""
+
+
 def capture(conn: sqlite3.Connection, client: Client, max_requests: int = DAILY_LIMIT, log=print) -> dict:
-    stats = {"requests": 0, "resolved": 0, "venues": 0, "unchanged": 0, "events": 0}
-    queue_venues_to_resolve(conn)
+    """Work through due lookups and event lists until the budget or the work runs out."""
+    stats = {"requests": 0, "resolved": 0, "venues": 0, "unchanged": 0, "events": 0,
+             "pushback": 0, "_streak": 0}
+    until = paused_until(conn)
+    if until:
+        log(f"pollstar: paused until {until} after repeated pushback; skipping")
+        stats.pop("_streak")
+        return stats
 
     def budget_left() -> bool:
         return stats["requests"] < max_requests and state.requests_today(conn, SOURCE) < DAILY_LIMIT
 
-    def spend():
-        stats["requests"] += 1
-        state.record_usage(conn, SOURCE)
+    def get(call, *args):
+        """One request, retried after pushback. Commits first: no lock held while waiting."""
+        while True:
+            conn.commit()
+            try:
+                resp = call(*args)
+            except requests.RequestException as exc:
+                resp, why = None, f"{type(exc).__name__}: {exc}"
+            db.begin_write(conn)
+            stats["requests"] += 1
+            state.record_usage(conn, SOURCE)
+            if resp is not None and resp.status not in PUSHBACK_STATUSES:
+                stats["_streak"] = 0
+                return resp
+            if resp is not None:
+                why = f"HTTP {resp.status} {resp.text[:120]!r}"
+            streak = stats["_streak"]
+            stats["pushback"] += 1
+            if streak >= len(BACKOFF_SECONDS):
+                raise Blocked(why)
+            wait = max((resp.retry_after if resp is not None else None) or 0, BACKOFF_SECONDS[streak])
+            interval = client.slow_down() if hasattr(client, "slow_down") else None
+            log(f"  pollstar: {why}; waiting {wait:.0f}s"
+                + (f", then {interval:.1f}s between requests" if interval else ""))
+            stats["_streak"] = streak + 1
+            conn.commit()
+            sleep(wait)
 
-    for row in state.due(conn, SOURCE, limit=10_000):
-        if not budget_left():
-            break
-        kind, ident = row["key"].split(":", 1)
-        if kind == "venue":
-            _fetch_venue(conn, client, row, ident, stats, spend, budget_left, log)
-        elif kind == "resolve":
-            _resolve(conn, client, row, int(ident), stats, spend, log)
+    last_queue = None
+    try:
+        while budget_left():
+            if last_queue is None or time.monotonic() - last_queue > REQUEUE_SECONDS:
+                db.begin_write(conn)
+                queue_venues_to_resolve(conn)
+                conn.commit()
+                last_queue = time.monotonic()
+            rows = state.due(conn, SOURCE, limit=DUE_BATCH)
+            if not rows:
+                break
+            for row in rows:
+                if not budget_left():
+                    break
+                kind, ident = row["key"].split(":", 1)
+                if kind == "venue":
+                    _fetch_venue(conn, get, client, row, ident, stats, budget_left, log)
+                elif kind == "resolve":
+                    _resolve(conn, get, client, row, int(ident), stats, log)
+                conn.commit()
+    except Blocked as exc:
+        until = pause(conn, PAUSE_HOURS)
+        log(f"pollstar: {len(BACKOFF_SECONDS) + 1} pushbacks in a row ({exc}); paused until {until}")
         conn.commit()
+    stats.pop("_streak", None)
     return stats
 
 
-def _resolve(conn, client, row, venue_id, stats, spend, log) -> None:
+def _resolve(conn, get, client, row, venue_id, stats, log) -> None:
     v = conn.execute("SELECT name, city FROM venues WHERE id = ?", (venue_id,)).fetchone()
-    resp = client.autocomplete(v["name"])
-    spend()
+    if not v:
+        state.postpone(conn, SOURCE, row["key"], NO_MATCH_DAYS)
+        return
+    resp = get(client.autocomplete, v["name"])
     if resp.status != 200:
         state.mark_failed(conn, SOURCE, row["key"])
         return
@@ -219,7 +313,7 @@ def _resolve(conn, client, row, venue_id, stats, spend, log) -> None:
         state.postpone(conn, SOURCE, row["key"], NO_MATCH_DAYS)
 
 
-def _fetch_venue(conn, client, row, pollstar_id, stats, spend, budget_left, log) -> None:
+def _fetch_venue(conn, get, client, row, pollstar_id, stats, budget_left, log) -> None:
     venue = conn.execute("SELECT venue_id FROM venue_source_ids WHERE source = ? AND native_id = ?",
                          (SOURCE, pollstar_id)).fetchone()
     if not venue:
@@ -230,8 +324,7 @@ def _fetch_venue(conn, client, row, pollstar_id, stats, spend, budget_left, log)
     while page < min(total_pages, MAX_PAGES):
         if not budget_left():
             return  # stays due; next run refetches from page 0 (lists are small)
-        resp = client.events(pollstar_id, page)
-        spend()
+        resp = get(client.events, pollstar_id, page)
         if resp.status != 200:
             log(f"  pollstar venue {pollstar_id}: HTTP {resp.status}")
             state.mark_failed(conn, SOURCE, row["key"])
