@@ -133,17 +133,18 @@ def cmd_crawl_setlistfm(args):
 
 
 def cmd_run(args):
-    """One scheduled cycle: watched pages, Pollstar, setlist.fm, backup. Safe to run often."""
+    """One scheduled cycle: watched pages, setlist.fm, Pollstar, backup. Safe to run often."""
     conn = _conn(args)
     print("== capture (schema.org pages)")
     print(jsonld.capture(conn, Fetcher(_data_dir(args), min_interval=1.0)))
-    print("== Pollstar (upcoming shows)")
-    print(pollstar.capture(conn, _pollstar_client(args), max_requests=args.pollstar_requests))
     if os.environ.get("SETLISTFM_API_KEY"):
         print("== setlist.fm")
         print(setlistfm.crawl(conn, _setlistfm_client(args), max_requests=args.setlistfm_requests))
     else:
         print("== setlist.fm skipped (no SETLISTFM_API_KEY)")
+    # After setlist.fm, so venues it found today get their Pollstar lookup today.
+    print("== Pollstar (upcoming shows)")
+    print(pollstar.capture(conn, _pollstar_client(args), max_requests=args.pollstar_requests))
     if not args.no_backup:
         cmd_backup(args, conn)
 
@@ -252,7 +253,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--max-requests", type=int, default=setlistfm.DAILY_LIMIT)
     s.set_defaults(fn=cmd_crawl_setlistfm, locked=True)
 
-    s = sub.add_parser("run", help="one scheduled cycle: watched pages, Pollstar, setlist.fm, backup")
+    s = sub.add_parser("run", help="one scheduled cycle: watched pages, setlist.fm, Pollstar, backup")
     s.add_argument("--setlistfm-requests", type=int, default=setlistfm.DAILY_LIMIT)
     s.add_argument("--pollstar-requests", type=int, default=pollstar.DAILY_LIMIT)
     s.add_argument("--no-backup", action="store_true")

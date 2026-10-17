@@ -25,6 +25,7 @@ class Response:
     etag: str | None
     last_modified: str | None
     content_hash: str | None
+    retry_after: float | None = None    # seconds, from a 429/503 Retry-After header
 
     @property
     def not_modified(self) -> bool:
@@ -36,6 +37,13 @@ class Response:
 
 def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _retry_after(value: str | None) -> float | None:
+    try:
+        return float(value) if value else None
+    except ValueError:
+        return None  # HTTP-date form: ignore, the caller's backoff applies
 
 
 class Fetcher:
@@ -76,6 +84,7 @@ class Fetcher:
             etag=r.headers.get("ETag"),
             last_modified=r.headers.get("Last-Modified"),
             content_hash=content_hash(text) if r.status_code == 200 else None,
+            retry_after=_retry_after(r.headers.get("Retry-After")),
         )
         if r.status_code == 200:
             self.archive(source, r.url, params, text)

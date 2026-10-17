@@ -84,12 +84,45 @@ def test_not_found_is_postponed(conn):
     assert len(client.calls) == 1
 
 
-def test_rate_limit_stops_run(conn):
+class SequenceClient:
+    """Returns the given responses in order, whatever page is asked for."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+        self.interval = 1.0
+
+    def page(self, kind, ident, page):
+        self.calls.append((kind, ident, page))
+        return self.responses.pop(0) if self.responses else status(404)
+
+    def slow_down(self):
+        self.interval *= 1.5
+        return self.interval
+
+
+def test_rate_limit_waits_and_retries_same_page(conn, monkeypatch):
+    waits = []
+    monkeypatch.setattr(setlistfm, "sleep", waits.append)
+    state.ensure(conn, "setlistfm", f"artist:{OSEES}")
+    limited = status(429)
+    limited.retry_after = 45
+    client = SequenceClient([limited, status(429), setlist_page([_sl(1)])])
+    stats = setlistfm.crawl(conn, client, max_requests=10, log=lambda *_: None)
+    assert [c[2] for c in client.calls if c[0] == "artist"] == [1, 1, 1]
+    assert waits[:2] == [45, setlistfm.BACKOFF_SECONDS[1]]   # Retry-After honored when longer
+    assert client.interval == 2.25                             # slowed down twice
+    assert stats["rate_limited"] == 2 and stats["new"] == 1
+
+
+def test_repeated_rate_limit_stops_run(conn, monkeypatch):
+    monkeypatch.setattr(setlistfm, "sleep", lambda s: None)
     state.ensure(conn, "setlistfm", "artist:a")
     state.ensure(conn, "setlistfm", "artist:b")
-    client = FakeSetlistClient({("artist", "a"): [status(429)], ("artist", "b"): [status(429)]})
+    client = SequenceClient([status(429)] * 20)
     stats = setlistfm.crawl(conn, client, max_requests=50, log=lambda *_: None)
-    assert stats["requests"] == 1
+    assert stats["requests"] == len(setlistfm.BACKOFF_SECONDS) + 1
+    assert "_streak" not in stats
 
 
 def test_daily_limit_respected(conn, monkeypatch):

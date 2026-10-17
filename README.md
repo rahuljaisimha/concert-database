@@ -54,7 +54,7 @@ concertdb capture-add https://dice.fm/venue/zebulon-...
 # looked up automatically; this is for adding one by hand)
 concertdb pollstar-add Zebulon --city "Los Angeles"
 
-# One full cycle: watched pages, Pollstar, the day's setlist.fm budget, backup
+# One full cycle: watched pages, the day's setlist.fm budget, Pollstar, backup
 concertdb run
 
 concertdb status                      # coverage and progress

@@ -2,8 +2,9 @@
 
 ## What the job needs
 
-- **Compute:** almost nothing. One run a day takes ~15–30 minutes, mostly
-  waiting between requests (setlist.fm: 1,400 requests at ~0.6 s apart).
+- **Compute:** almost nothing. One run a day takes ~30–40 minutes, mostly
+  waiting between requests (setlist.fm: 1,400 requests ~1 s apart, slower
+  after a rate-limit response).
 - **Memory:** well under 1 GB.
 - **Disk:** a few GB over the first year (database + compressed raw archive).
 - **Uptime:** it has to run *once a day*, not continuously.

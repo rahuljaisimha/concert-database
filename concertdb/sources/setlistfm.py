@@ -14,6 +14,7 @@ with nothing new.
 
 import json
 import sqlite3
+import time
 from datetime import datetime
 
 from .. import ledger, state
@@ -23,7 +24,12 @@ from ..infer import SetlistFacts, infer_bill
 SOURCE = "setlistfm"
 BASE = "https://api.setlist.fm/rest/1.0"
 DAILY_LIMIT = 1400          # leave headroom under the ~1,440/day key limit
-MIN_INTERVAL = 0.6          # seconds between requests
+MIN_INTERVAL = 1.0          # seconds between requests (start to start)
+MAX_INTERVAL = 5.0
+# On HTTP 429: wait, slow down for the rest of the run, retry the same page.
+# After this many 429s in a row it's probably the daily limit: stop the run.
+BACKOFF_SECONDS = (10, 30, 60, 120)
+sleep = time.sleep          # replaced in tests
 RECHECK_MIN_DAYS = 14
 RECHECK_MAX_DAYS = 180
 NOT_FOUND_DAYS = 180
@@ -37,6 +43,10 @@ class Client:
     def __init__(self, fetcher: Fetcher, api_key: str):
         self.fetcher = fetcher
         self.api_key = api_key
+
+    def slow_down(self) -> float:
+        self.fetcher.min_interval = min(MAX_INTERVAL, self.fetcher.min_interval * 1.5)
+        return self.fetcher.min_interval
 
     def page(self, kind: str, ident: str, page: int):
         path = {"artist": f"/artist/{ident}/setlists", "venue": f"/venue/{ident}/setlists"}[kind]
@@ -136,25 +146,26 @@ def reinfer_show(conn: sqlite3.Connection, show_id: int) -> None:
 
 def crawl(conn: sqlite3.Connection, client: Client, max_requests: int, log=print) -> dict:
     """Spend up to max_requests (and never more than DAILY_LIMIT today)."""
-    stats = {"requests": 0, "setlists": 0, "new": 0, "units": 0}
+    stats = {"requests": 0, "setlists": 0, "new": 0, "units": 0, "rate_limited": 0, "_streak": 0}
 
     def budget_left() -> bool:
         return stats["requests"] < max_requests and state.requests_today(conn, SOURCE) < DAILY_LIMIT
 
-    while budget_left():
-        rows = state.due(conn, SOURCE, limit=20)
-        if not rows:
-            break
-        for row in rows:
-            if not budget_left():
+    try:
+        while budget_left():
+            rows = state.due(conn, SOURCE, limit=20)
+            if not rows:
                 break
-            try:
+            for row in rows:
+                if not budget_left():
+                    break
                 _crawl_unit(conn, client, row, stats, budget_left, log)
-            except RateLimited:
-                log("setlist.fm rate limit hit; stopping this run")
                 conn.commit()
-                return stats
-            conn.commit()
+    except RateLimited:
+        log(f"setlist.fm: {len(BACKOFF_SECONDS) + 1} rate-limit responses in a row"
+            " (probably the daily limit); stopping this run")
+        conn.commit()
+    stats.pop("_streak", None)
     return stats
 
 
@@ -176,7 +187,18 @@ def _crawl_unit(conn, client, row, stats, budget_left, log) -> None:
             state.postpone(conn, SOURCE, key, NOT_FOUND_DAYS)
             return
         if resp.status == 429:
-            raise RateLimited()
+            streak = stats["_streak"]
+            stats["rate_limited"] += 1
+            if streak >= len(BACKOFF_SECONDS):
+                raise RateLimited()
+            wait = max(resp.retry_after or 0, BACKOFF_SECONDS[streak])
+            interval = client.slow_down() if hasattr(client, "slow_down") else None
+            log(f"  {key}: HTTP 429 {resp.text[:200]!r}; waiting {wait:.0f}s"
+                + (f", then {interval:.1f}s between requests" if interval else ""))
+            stats["_streak"] = streak + 1
+            sleep(wait)
+            continue  # same page again
+        stats["_streak"] = 0
         if resp.status != 200:
             log(f"  {key}: HTTP {resp.status}")
             state.mark_failed(conn, SOURCE, key)

@@ -46,6 +46,14 @@ Otherwise roles stay unknown (the show still counts as "played together").
 - Every response is archived (`data/raw/<source>/<day>.jsonl.gz`) so parsers
   and prompts can be re-run without refetching.
 
+## Rate limits
+
+setlist.fm requests start at least 1 s apart. On HTTP 429 the crawler waits
+(the `Retry-After` header if given, else 10 s, 30 s, 60 s, 120 s), slows to
+1.5× the interval for the rest of the run (capped at 5 s), and retries the
+same page. Five 429s in a row is treated as the daily limit and ends the
+run; the cursor resumes from that page next time.
+
 ## Moving to Postgres later
 
 Tables are `STRICT`, dates are ISO-8601 text, booleans are 0/1 integers with
