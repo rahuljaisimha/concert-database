@@ -189,3 +189,23 @@ def test_gemini_quota_day_is_pacific():
     t = datetime(2026, 10, 18, 3, 0, tzinfo=timezone.utc)
     assert state.usage_day("gemini", t).isoformat() == "2026-10-17"
     assert state.usage_day("setlistfm", t).isoformat() == "2026-10-18"
+
+
+def test_no_transaction_is_open_during_network_calls(conn):
+    # Another process (run, pollstar) must be able to write while Gemini waits on the network.
+    single_act_show(conn)
+    seen = []
+
+    class Watching(FakeClient):
+        def generate(self, model, prompt):
+            seen.append(conn.in_transaction)
+            return super().generate(model, prompt)
+
+        def page(self, url):
+            seen.append(conn.in_transaction)
+            return super().page(url)
+
+    client = Watching([GROUNDED], {"https://example.com/zebulon/iguana-death-cult": EVENT_PAGE})
+    assert gemini.ask(conn, client, **QUIET)["found"] == 1
+    assert seen and not any(seen)
+    assert not conn.in_transaction

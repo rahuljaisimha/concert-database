@@ -31,7 +31,7 @@ from datetime import date
 
 import requests
 
-from .. import ledger, state
+from .. import db, ledger, state
 from ..http import Fetcher
 from ..normalize import norm
 
@@ -202,6 +202,7 @@ def ask(conn: sqlite3.Connection, client: Client, max_requests: int = DAILY_LIMI
         max_acts: int = MAX_ACTS, log=print) -> dict:
     stats = {"requests": 0, "found": 0, "verified": 0, "not_found": 0, "skipped": 0,
              "errors": 0, "search_queries": 0, "stopped": None}
+    db.begin_write(conn)
     queue_shows(conn, max_acts)
     conn.commit()
 
@@ -233,8 +234,12 @@ def ask(conn: sqlite3.Connection, client: Client, max_requests: int = DAILY_LIMI
 
 
 def _ask(conn, client, model, row, max_acts, stats, log) -> str:
+    """One show. Commits before every network call and takes the write lock
+    (db.begin_write) only to store what came back; see "Concurrency" in
+    docs/ARCHITECTURE.md."""
     key = row["key"]
     show_id = int(key.split(":", 1)[1])
+    db.begin_write(conn)
     show = _show(conn, show_id)
     if show is None or len(show["acts"]) > max_acts or show["is_festival"]:
         # Another source filled it in (or max_acts was lowered). Forgotten rather than
@@ -251,6 +256,7 @@ def _ask(conn, client, model, row, max_acts, stats, log) -> str:
         resp = client.generate(model, build_prompt(show))
     except requests.RequestException as e:
         log(f"  gemini show {show_id}: {type(e).__name__}")
+        db.begin_write(conn)
         state.mark_failed(conn, SOURCE, key)
         stats["errors"] += 1
         return "error"
@@ -259,6 +265,7 @@ def _ask(conn, client, model, row, max_acts, stats, log) -> str:
         return "quota"
     if resp.status != 200:
         log(f"  gemini show {show_id}: HTTP {resp.status} {resp.text[:300]}")
+        db.begin_write(conn)
         state.mark_failed(conn, SOURCE, key)
         stats["errors"] += 1
         return "error"
@@ -269,12 +276,14 @@ def _ask(conn, client, model, row, max_acts, stats, log) -> str:
     if answer is None or not answer["openers"]:
         if answer is None:
             log(f"  gemini show {show_id}: no JSON answer (finishReason {r['finish']})")
+        db.begin_write(conn)
         state.mark_checked(conn, SOURCE, key, changed=False,
                            min_days=NOT_FOUND_MIN_DAYS, max_days=NOT_FOUND_MAX_DAYS)
         stats["not_found"] += 1
         return "not_found"
 
     pages = _fetch_evidence(client, answer, r["sources"])
+    db.begin_write(conn)
     acts = ([(answer["headliner"], "headliner")] if answer["headliner"] else []) + [
         (o, "opener") for o in answer["openers"] if norm(o) != norm(answer["headliner"])]
     for pos, (name, role) in enumerate(acts):

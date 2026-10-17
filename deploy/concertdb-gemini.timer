@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the concert-database Gemini opener search once a day
+
+[Timer]
+# Soon after the free-tier quota resets at midnight Pacific, whatever the
+# machine's own time zone.
+OnCalendar=*-*-* 00:15 America/Los_Angeles
+RandomizedDelaySec=30m
+# If the machine was off then, run as soon as it's back on.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

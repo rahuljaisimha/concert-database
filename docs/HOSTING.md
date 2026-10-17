@@ -55,9 +55,10 @@ later; `concertdb restore` makes the move a five-minute job.
 1. Raspberry Pi OS Lite (64-bit), boot from (or mount) the SSD.
 2. `sudo apt install python3-venv git`, then follow Setup in the README.
 3. Put `.env` in the repo directory (`chmod 600 .env`).
-4. Install both timers (instructions at the top of `deploy/concertdb.service`
-   and `deploy/concertdb-pollstar.service`).
-5. `systemctl --user list-timers` to confirm; `journalctl --user -u concertdb -u concertdb-pollstar` for logs.
+4. Install the timers (instructions at the top of `deploy/concertdb.service`,
+   `deploy/concertdb-pollstar.service` and, for the Gemini step,
+   `deploy/concertdb-gemini.service`).
+5. `systemctl --user list-timers` to confirm; `journalctl --user -u concertdb -u concertdb-pollstar -u concertdb-gemini` for logs.
 
 ## Windows setup (WSL)
 
@@ -88,10 +89,11 @@ Windows Task Scheduler.
    (`deploy/run-pollstar.sh`, Pollstar at ~1 request/s for several hours, log
    in `data/pollstar.log`). They run side by side; see "Concurrency" in
    docs/ARCHITECTURE.md.
-   A third task, `concert-database-gemini`, starts at 1 am (`deploy/gemini.sh`,
+   A third task, `concert-database-gemini`, starts at 1 am (`deploy/run-gemini.sh`,
    log in `data/gemini.log`; it exits quickly when `GEMINI_API_KEY` isn't set).
-   The Gemini step's budget follows the Pacific day whatever the PC's time
-   zone, so the 1 am start only matters for using a fresh quota early.
+   The 1 am start is in the PC's own time; the Gemini step's budget follows
+   the Pacific day whatever the time zone, so the start time only matters for
+   using a fresh quota early.
 5. Power options: let the PC sleep if you like, but enable wake timers (or set
    it never to sleep); the task wakes it.
 

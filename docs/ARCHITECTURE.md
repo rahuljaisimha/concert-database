@@ -62,8 +62,9 @@ run; the cursor resumes from that page next time.
 
 ## Concurrency
 
-Two processes share the database: the daily `concertdb run` (pages,
-setlist.fm, backup) and the long-running `concertdb pollstar`. SQLite in WAL
+Three processes share the database: the daily `concertdb run` (pages,
+setlist.fm, backup) and the long-running `concertdb pollstar` and
+`concertdb gemini`. SQLite in WAL
 mode lets readers run alongside one writer; writers take turns. To keep the
 turns short:
 
@@ -77,7 +78,8 @@ turns short:
 - **Writers wait instead of failing**: connections wait up to 60 s
   (`db.BUSY_TIMEOUT`) for the other process's write to finish.
 - **One process per kind**: lock files `ledger.crawl.lock` (run, setlist.fm,
-  pages, seed) and `ledger.pollstar.lock` (Pollstar). `run` skips its Pollstar
+  pages, seed), `ledger.pollstar.lock` (Pollstar) and `ledger.gemini.lock`
+  (Gemini). `run` skips its Pollstar
   step while the Pollstar process holds its lock.
 - Backups use SQLite's backup API, which is safe while either process writes.
 
@@ -154,9 +156,10 @@ go one at a time, 2 s apart, and the run takes a few hours.
   then 365 days; a show that no longer qualifies (another source added an
   act, or `GEMINI_MAX_ACTS` was lowered) is skipped and dropped from the
   queue, so it comes back if it qualifies again
-- `concertdb gemini` takes its own lock (`ledger.gemini.lock`), so it runs
-  alongside `concertdb run`; SQLite (WAL) lets both write, waiting up to a
-  minute for the other's transaction
+- `concertdb gemini` is its own process with its own lock
+  (`ledger.gemini.lock`), next to `run` and `pollstar`; it commits before each
+  Gemini request and page fetch and holds the write lock only while storing
+  (see "Concurrency")
 - responses and fetched pages are archived (`data/raw/gemini/`,
   `data/raw/gemini-pages/`)
 

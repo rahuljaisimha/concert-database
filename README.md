@@ -72,13 +72,13 @@ concertdb shows "Flat Worms"          # what we know about an artist
 concertdb export --graph-only         # data/export/opened_for.csv for MusicSceneMap
 ```
 
-On the always-on machine, two daily scheduled jobs start at 4 am and catch up
-after the machine was off: `deploy/run.sh` (one `concertdb run`, logged to
-`data/run.log`) and `deploy/run-pollstar.sh` (the long Pollstar process,
-logged to `data/pollstar.log`). Windows Task Scheduler via WSL
-(`deploy/windows-task.ps1`) or systemd timers on Linux (`deploy/*.timer`).
-A third daily task runs `deploy/gemini.sh` (`concertdb gemini`, logged to
-`data/gemini.log`).
+On the always-on machine, three daily scheduled jobs run side by side and
+catch up after the machine was off: `deploy/run.sh` (one `concertdb run`,
+logged to `data/run.log`) and `deploy/run-pollstar.sh` (the long Pollstar
+process, logged to `data/pollstar.log`) at 4 am, and `deploy/run-gemini.sh`
+(`concertdb gemini`, logged to `data/gemini.log`) at 1 am, soon after
+Gemini's free quota resets at midnight Pacific. Windows Task Scheduler via
+WSL (`deploy/windows-task.ps1`) or systemd timers on Linux (`deploy/*.timer`).
 See docs/HOSTING.md.
 
 ## Backups
