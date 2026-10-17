@@ -35,8 +35,13 @@ Otherwise roles stay unknown (the show still counts as "played together").
 
 - Past shows don't change: once stored, a setlist is only re-read if its
   `lastUpdated` changes.
-- First visit to an artist/venue pages through its full history, saving a
-  cursor after every page so a run that hits the daily budget resumes there.
+- First visit to an artist/venue reads its newest 10 pages (200 setlists),
+  saving a cursor after every page so a run that hits the daily budget
+  resumes there. The rest of its history is queued as a **deep pass** at the
+  lowest priority, so every artist gets recent coverage before any artist's
+  old shows are fetched; the deep pass then continues from the saved page
+  until the history is complete. Artists you `prioritize` skip the cap and
+  get their full history at once.
 - Later visits read newest-first and stop at the first page with nothing new.
 - Recheck intervals double when nothing changed (setlist.fm 14 → 180 days,
   pages 1 → 7 days, or 365 once every event on a page is past) and reset when

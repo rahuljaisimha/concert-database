@@ -144,3 +144,51 @@ def test_updated_setlist_is_reingested(conn):
     client.pages[("artist", OSEES)] = [setlist_page([_sl(1, updated="2024-05-05T00:00:00.000+0000")])]
     stats = setlistfm.crawl(conn, client, max_requests=5, log=lambda *_: None)
     assert stats["new"] == 1
+
+
+def _pages(n):
+    return [setlist_page([_sl(i)], total=n, page=i, per_page=1) for i in range(1, n + 1)]
+
+
+def test_first_pass_is_capped_then_deep_pass_finishes(conn, monkeypatch):
+    monkeypatch.setattr(setlistfm, "FIRST_PASS_PAGES", 2)
+    state.ensure(conn, "setlistfm", f"artist:{OSEES}", priority=50)
+    state.ensure(conn, "setlistfm", "artist:other", priority=10)
+    client = FakeSetlistClient({("artist", OSEES): _pages(5), ("artist", "other"): _pages(1)})
+    setlistfm.crawl(conn, client, max_requests=100, log=lambda *_: None)
+    artist_calls = [(c[1], c[2]) for c in client.calls if c[0] == "artist"]
+    # Osees: newest 2 pages, then "other" gets its turn, then Osees' older pages.
+    assert artist_calls == [(OSEES, 1), (OSEES, 2), ("other", 1), (OSEES, 3), (OSEES, 4), (OSEES, 5)]
+    row = state.get(conn, "setlistfm", f"artist:{OSEES}")
+    assert state.get_cursor(row) == {"backfill_done": True}
+    assert conn.execute("SELECT COUNT(*) FROM claims WHERE artist_id = ?", (OSEES,)).fetchone()[0] == 5
+
+
+def test_deep_pass_waits_for_first_passes(conn, monkeypatch):
+    monkeypatch.setattr(setlistfm, "FIRST_PASS_PAGES", 1)
+    state.ensure(conn, "setlistfm", f"artist:{OSEES}", priority=50)
+    client = FakeSetlistClient({("artist", OSEES): _pages(3)})
+    setlistfm.crawl(conn, client, max_requests=1, log=lambda *_: None)
+    setlistfm.crawl(conn, client, max_requests=1, log=lambda *_: None)   # only defers, no request
+    row = state.get(conn, "setlistfm", f"artist:{OSEES}")
+    assert state.get_cursor(row) == {"deep": True, "next_page": 2}
+    assert row["priority"] == setlistfm.DEEP_PRIORITY and row["last_checked"] is not None
+    assert len([c for c in client.calls if c[0] == "artist"]) == 1
+
+
+def test_in_progress_cursor_beyond_cap_is_deferred(conn):
+    """An artist that was mid-history before the cap existed (e.g. page 48)."""
+    state.ensure(conn, "setlistfm", f"artist:{OSEES}", priority=50)
+    state.save_cursor(conn, "setlistfm", f"artist:{OSEES}", {"next_page": 48})
+    client = FakeSetlistClient({})
+    stats = setlistfm.crawl(conn, client, max_requests=1, log=lambda *_: None)
+    assert stats["deferred"] == 1
+    assert state.get_cursor(state.get(conn, "setlistfm", f"artist:{OSEES}")) == {"deep": True, "next_page": 48}
+
+
+def test_prioritized_artists_are_not_capped(conn, monkeypatch):
+    monkeypatch.setattr(setlistfm, "FIRST_PASS_PAGES", 1)
+    state.ensure(conn, "setlistfm", f"artist:{OSEES}", priority=setlistfm.NO_CAP_PRIORITY)
+    client = FakeSetlistClient({("artist", OSEES): _pages(3)})
+    setlistfm.crawl(conn, client, max_requests=10, log=lambda *_: None)
+    assert [c[2] for c in client.calls if c[0] == "artist"] == [1, 2, 3]
