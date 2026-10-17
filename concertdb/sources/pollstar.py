@@ -126,11 +126,13 @@ def assign_roles(artists: list[dict]) -> list[tuple[str, str, float]]:
 # ----------------------------------------------------------------- ingest
 
 def ingest_event(conn: sqlite3.Connection, e: dict, venue_id: int) -> int:
-    show_id = ledger.find_or_create_show(conn, e["date"], venue_id)
-    for pos, (name, role, conf) in enumerate(assign_roles(e["artists"])):
-        aid = ledger.get_or_create_artist(conn, name)
-        ledger.add_claim(conn, show_id, aid, SOURCE, e["id"], role=role, confidence=conf,
-                         position=pos, url=e["url"], extra={"title": e["name"]}, resolve=False)
+    acts = [(ledger.get_or_create_artist(conn, name), role, conf)
+            for name, role, conf in assign_roles(e["artists"])]
+    show_id = ledger.find_or_create_show(conn, e["date"], venue_id, [a for a, _, _ in acts],
+                                         source=SOURCE, native_id=e["id"])
+    for pos, (aid, role, conf) in enumerate(acts):
+        ledger.add_claim(conn, show_id, aid, SOURCE, e["id"], role=role, confidence=conf, position=pos,
+                         url=e["url"], extra={"title": e["name"], "date": e["date"]}, resolve=False)
     ledger.resolve_show(conn, show_id)  # recomputes is_festival from act count
     if e["is_festival"]:
         conn.execute("UPDATE shows SET is_festival = 1 WHERE id = ?", (show_id,))

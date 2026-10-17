@@ -117,29 +117,91 @@ def get_or_create_venue(
 
 # ------------------------------------------------------------------ shows
 
-def find_or_create_show(conn: sqlite3.Connection, show_date: str, venue_id: int) -> int:
-    """One show per venue per night.
+# Sources whose native_id names a whole event (one bill), not one act's set.
+# Two different events from one of these are never the same show.
+EVENT_SOURCES = frozenset({"pollstar", "jsonld", "manual"})
 
-    Dates within one day count as the same show: some sources date a show
-    that runs past midnight to the next day.
+
+def find_or_create_show(
+    conn: sqlite3.Connection,
+    show_date: str,
+    venue_id: int,
+    artist_ids=(),
+    source: str | None = None,
+    native_id: str | None = None,
+    exclude_show: int | None = None,
+) -> int:
+    """The show at this venue on this night that a source's record belongs to.
+
+    A record already stored (same source + native_id) keeps its show. Otherwise
+    a show at the venue counts as the same one when nothing rules it out (see
+    _other_event) and either
+      - it is on the same date, or
+      - it is a day apart AND shares an act: some sources date a show that
+        runs past midnight to the next day, but a venue's shows on
+        consecutive nights are different shows.
+    A shared act is preferred over a same-date match. `exclude_show` skips one
+    show (used when re-placing the records of a show being split).
     """
+    artist_ids = set(artist_ids)
+    if source and native_id:
+        row = conn.execute(
+            "SELECT c.show_id, s.date FROM claims c JOIN shows s ON s.id = c.show_id"
+            " WHERE c.source = ? AND c.native_id = ? AND c.show_id IS NOT ?",
+            (source, native_id, exclude_show),
+        ).fetchone()
+        if row and row["date"] == show_date:
+            return row["show_id"]
+
     d = date.fromisoformat(show_date)
     lo, hi = (d - timedelta(days=1)).isoformat(), (d + timedelta(days=1)).isoformat()
-    rows = conn.execute(
-        "SELECT id, date FROM shows WHERE venue_id = ? AND date BETWEEN ? AND ?",
-        (venue_id, lo, hi),
-    ).fetchall()
-    exact = [r for r in rows if r["date"] == show_date]
-    if exact:
-        return exact[0]["id"]
-    if rows:
-        return rows[0]["id"]
+    best = None
+    for r in conn.execute(
+        "SELECT id, date FROM shows WHERE venue_id = ? AND date BETWEEN ? AND ? AND id IS NOT ?"
+        " ORDER BY id", (venue_id, lo, hi, exclude_show),
+    ).fetchall():
+        claims = conn.execute(
+            "SELECT artist_id, source, native_id FROM claims WHERE show_id = ?", (r["id"],)
+        ).fetchall()
+        if _other_event(claims, artist_ids, source, native_id):
+            continue
+        shared = bool(artist_ids & {c["artist_id"] for c in claims})
+        exact = r["date"] == show_date
+        if not (shared or exact):
+            continue
+        if best is None or (shared, exact) > best[0]:
+            best = ((shared, exact), r["id"])
+    if best:
+        return best[1]
+
     ts = now_iso()
     cur = conn.execute(
         "INSERT INTO shows (date, venue_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
         (show_date, venue_id, "played" if d < date.today() else "scheduled", ts, ts),
     )
     return cur.lastrowid
+
+
+def _other_event(claims, artist_ids: set, source: str | None, native_id: str | None) -> bool:
+    """Does this show already hold a different record from the same source that
+    can't be the same performance? For an event source, any other event; for a
+    per-act source (setlist.fm), another set by one of the same acts (a
+    residency: same band, same venue, next night)."""
+    if not (source and native_id):
+        return False
+    for c in claims:
+        if c["source"] == source and c["native_id"] != native_id:
+            if source in EVENT_SOURCES or c["artist_id"] in artist_ids:
+                return True
+    return False
+
+
+def drop_show_if_empty(conn: sqlite3.Connection, show_id: int) -> bool:
+    if conn.execute("SELECT 1 FROM claims WHERE show_id = ? LIMIT 1", (show_id,)).fetchone():
+        return False
+    conn.execute("DELETE FROM billings WHERE show_id = ?", (show_id,))
+    conn.execute("DELETE FROM shows WHERE id = ?", (show_id,))
+    return True
 
 
 def set_show_status(conn: sqlite3.Connection, show_id: int, status: str) -> None:
@@ -186,7 +248,9 @@ def add_claim(
     )
     if resolve:
         resolve_show(conn, show_id)
-        if old and old["show_id"] != show_id:
+    if old and old["show_id"] != show_id:
+        # The record moved (e.g. a rescheduled event): fix up the show it left.
+        if not drop_show_if_empty(conn, old["show_id"]):
             resolve_show(conn, old["show_id"])
     return True
 

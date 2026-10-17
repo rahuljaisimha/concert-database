@@ -7,7 +7,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from . import backup, db, export, ledger, seed, smoke, state, status
+from . import backup, db, export, ledger, repair, seed, smoke, state, status
 from .http import Fetcher
 from .normalize import norm
 from .sources import gemini, jsonld, pollstar, setlistfm
@@ -51,11 +51,11 @@ def cmd_add_show(args):
     date.fromisoformat(args.date)  # validate
     db.begin_write(conn)
     venue_id = ledger.get_or_create_venue(conn, args.venue, args.city, args.state, args.country)
-    show_id = ledger.find_or_create_show(conn, args.date, venue_id)
     native = f"manual:{args.date}:{venue_id}"
     acts = [(args.headliner, "headliner")] + [(o, "opener") for o in args.opener or []]
-    for pos, (name, role) in enumerate(acts):
-        aid = ledger.get_or_create_artist(conn, name, None)
+    aids = [ledger.get_or_create_artist(conn, name, None) for name, _ in acts]
+    show_id = ledger.find_or_create_show(conn, args.date, venue_id, aids, source="manual", native_id=native)
+    for pos, (aid, (_, role)) in enumerate(zip(aids, acts)):
         ledger.add_claim(conn, show_id, aid, "manual", native, role=role, confidence=1.0,
                          position=pos, url=args.url, extra={"note": args.note} if args.note else None)
     if args.status:
@@ -205,6 +205,16 @@ def cmd_restore(args):
     backup.restore(Path(args.db), _data_dir(args))
 
 
+def cmd_repair_shows(args):
+    """Split shows the old ±1-day rule merged (see concertdb/repair.py)."""
+    plock = _lock(args, "pollstar")   # the Pollstar process writes shows too: wait for it to stop
+    try:
+        stats = repair.repair_shows(_conn(args), _data_dir(args), dry_run=args.dry_run)
+    finally:
+        plock.close()
+    print(stats)
+
+
 def cmd_smoke_test(args):
     ok = smoke.run(_data_dir(args) / "smoke", args.graph, args.page_url)
     sys.exit(0 if ok else 1)
@@ -315,6 +325,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--min-conf", type=float, default=0.4)
     s.add_argument("--graph-only", action="store_true", help="only artists in the MusicSceneMap graph")
     s.set_defaults(fn=cmd_export)
+
+    s = sub.add_parser("repair-shows", help="split shows that the old ±1-day rule merged wrongly")
+    s.add_argument("--dry-run", action="store_true", help="report what would change, save nothing")
+    s.set_defaults(fn=cmd_repair_shows, locked="crawl")
 
     s = sub.add_parser("smoke-test", help="a few live requests per source into a throwaway database")
     s.add_argument("--graph", default=seed.GRAPH_URL)

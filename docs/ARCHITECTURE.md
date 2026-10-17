@@ -5,7 +5,7 @@
 ```
 artists   id = MusicBrainz ID, or 'name:<normalized>' when not matched to the graph
 venues    + venue_source_ids (each source's own venue id → our venue)
-shows     one per venue per night (dates ±1 day merge: past-midnight shows)
+shows     one per venue per night (see "Which records are the same show")
 claims    what ONE source says about ONE artist at ONE show:
           role (headliner/opener/unknown), position, confidence, url, extra JSON
 billings  the resolved bill, recomputed from all claims for a show
@@ -13,6 +13,26 @@ crawl_state  one row per unit of work: next_due, adaptive interval, cursor, etag
 usage     requests and $ per source per day (budgets, caps; Gemini's day is
           Pacific time, when its free quota resets)
 ```
+
+### Which records are the same show
+
+`ledger.find_or_create_show()` decides which show a source's record belongs
+to (an event from Pollstar or a venue page, one setlist from setlist.fm):
+
+- a record already stored (same source and native id) keeps its show;
+- a show at the same venue on the same date is the same show;
+- a show a day apart is the same show only if it shares an act: some sources
+  date a show that runs past midnight to the next day, but a venue's shows on
+  consecutive nights, or a festival's days, are different shows;
+- never two different events from an event source (Pollstar, schema.org pages,
+  manual entries), and never two different setlists by the same act (a
+  residency's nights), even on the same date.
+
+Until October 2026 any two records a day apart were merged, which joined
+consecutive nights into one bill (and invented openers between them).
+`concertdb repair-shows` splits shows stored that way, using each record's
+own date (kept in the claim since then, or read back from the raw archive).
+It is safe to run again; `--dry-run` reports without saving.
 
 Sources only ever add claims. `ledger.resolve_show()` turns claims into
 billings: each source's vote is weighted (`SOURCE_WEIGHTS`: manual 1.0,
