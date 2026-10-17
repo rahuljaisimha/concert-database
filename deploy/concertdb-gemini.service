@@ -1,0 +1,19 @@
+# The Gemini step as its own process (~1,400 search-grounded requests, a few
+# hours), next to concertdb.service. Started daily by concertdb-gemini.timer.
+#
+# Install alongside concertdb.service / concertdb.timer (see that file):
+#   cp deploy/concertdb-gemini.service deploy/concertdb-gemini.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now concertdb-gemini.timer
+[Unit]
+Description=concert-database Gemini opener search
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/concert-database
+EnvironmentFile=%h/concert-database/.env
+ExecStart=%h/concert-database/.venv/bin/concertdb gemini
+Nice=10
+TimeoutStartSec=12h

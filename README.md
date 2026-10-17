@@ -17,7 +17,7 @@ came from:
 | Pollstar | Upcoming shows with headliner/support flags, saved before they disappear (past dates aren't public) | ✅ `concertdb pollstar-add` / `pollstar` |
 | Concert Archives (concertarchives.org) | Fan-logged past shows with full lineups, often older and smaller shows | planned (checking terms first) |
 | Wayback Machine | Archived venue calendars for past years | planned |
-| Web search + Claude | Fills specific gaps (a known show with no opener listed) | planned |
+| Gemini + Google Search | Fills specific gaps (a known show with no opener listed); answers are checked against the pages they cite | ✅ `concertdb gemini` |
 | Bandsintown | Past events with lineups (needs an `app_id`) | planned |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works and
@@ -62,16 +62,23 @@ concertdb run
 # or the due work runs out. Runs next to `run`; `run` then skips Pollstar.
 concertdb pollstar
 
+# Ask Gemini for openers of past shows with only one act listed (up to 1,400
+# a day, the free tier's search quota; can run while `concertdb run` is
+# running; GEMINI_MAX_ACTS / --max-acts widens it)
+concertdb gemini
+
 concertdb status                      # coverage and progress
 concertdb shows "Flat Worms"          # what we know about an artist
 concertdb export --graph-only         # data/export/opened_for.csv for MusicSceneMap
 ```
 
-On the always-on machine, two daily scheduled jobs start at 4 am and catch up
-after the machine was off: `deploy/run.sh` (one `concertdb run`, logged to
-`data/run.log`) and `deploy/run-pollstar.sh` (the long Pollstar process,
-logged to `data/pollstar.log`). Windows Task Scheduler via WSL
-(`deploy/windows-task.ps1`) or systemd timers on Linux (`deploy/*.timer`).
+On the always-on machine, three daily scheduled jobs run side by side and
+catch up after the machine was off: `deploy/run.sh` (one `concertdb run`,
+logged to `data/run.log`) and `deploy/run-pollstar.sh` (the long Pollstar
+process, logged to `data/pollstar.log`) at 4 am, and `deploy/run-gemini.sh`
+(`concertdb gemini`, logged to `data/gemini.log`) at 1 am, soon after
+Gemini's free quota resets at midnight Pacific. Windows Task Scheduler via
+WSL (`deploy/windows-task.ps1`) or systemd timers on Linux (`deploy/*.timer`).
 See docs/HOSTING.md.
 
 ## Backups
@@ -91,6 +98,7 @@ crawl continues where it stopped.
 
 `pytest` uses fixtures in `tests/fixtures/` (see its README). `smoke-test`
 makes a few real requests per source (setlist.fm for Flat Worms, Pollstar for
+Zebulon, one search-grounded Gemini request for the Iguana Death Cult show at
 Zebulon, optionally one page with `--page-url`) into a throwaway database
 under `data/smoke/`, prints PASS/FAIL per source, and never touches the real
 ledger or its daily budgets. Its saved responses in `data/smoke/raw/` make

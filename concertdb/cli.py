@@ -10,7 +10,7 @@ from pathlib import Path
 from . import backup, db, export, ledger, seed, smoke, state, status
 from .http import Fetcher
 from .normalize import norm
-from .sources import jsonld, pollstar, setlistfm
+from .sources import gemini, jsonld, pollstar, setlistfm
 
 # Pollstar requests spent inside `run` when no separate Pollstar process is
 # running (it keeps the daily run short; `concertdb pollstar` does the bulk).
@@ -135,6 +135,20 @@ def cmd_crawl_setlistfm(args):
     conn = _conn(args)
     stats = setlistfm.crawl(conn, _setlistfm_client(args), max_requests=args.max_requests)
     print(stats)
+
+
+def _gemini_client(args):
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key:
+        sys.exit("set GEMINI_API_KEY (get one at https://aistudio.google.com/apikey)")
+    return gemini.Client(Fetcher(_data_dir(args), min_interval=gemini.MIN_INTERVAL),
+                         Fetcher(_data_dir(args), min_interval=gemini.PAGE_INTERVAL),
+                         key, model=args.model or os.environ.get("GEMINI_MODEL") or None)
+
+
+def cmd_gemini(args):
+    conn = _conn(args)
+    print(gemini.ask(conn, _gemini_client(args), max_requests=args.max_requests, max_acts=args.max_acts))
 
 
 def cmd_run(args):
@@ -275,6 +289,14 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("crawl-setlistfm", help="spend setlist.fm requests on due artists/venues")
     s.add_argument("--max-requests", type=int, default=setlistfm.DAILY_LIMIT)
     s.set_defaults(fn=cmd_crawl_setlistfm, locked="crawl")
+
+    s = sub.add_parser("gemini", help="ask Gemini (with Google Search) for openers of shows that lack one")
+    s.add_argument("--max-requests", type=int, default=gemini.DAILY_LIMIT)
+    s.add_argument("--model", help="default: $GEMINI_MODEL, else the newest stable Flash")
+    s.add_argument("--max-acts", type=int, default=int(os.environ.get("GEMINI_MAX_ACTS") or gemini.MAX_ACTS),
+                   help="only ask about shows with at most this many acts listed"
+                        f" (default: $GEMINI_MAX_ACTS, else {gemini.MAX_ACTS})")
+    s.set_defaults(fn=cmd_gemini, locked="gemini")
 
     s = sub.add_parser("run", help="one scheduled cycle: watched pages, setlist.fm, Pollstar, backup")
     s.add_argument("--setlistfm-requests", type=int, default=setlistfm.DAILY_LIMIT)

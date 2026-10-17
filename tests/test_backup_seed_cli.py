@@ -111,9 +111,25 @@ def test_smoke_run_with_fake_sources(tmp_path, monkeypatch):
         def events(self, pid, page):
             return ok(fixture_text("pollstar_events_zebulon.json"))
 
+    class FakeGemini:
+        model = "gemini-3.8-flash"
+
+        def __init__(self, *a, **k):
+            pass
+
+        def generate(self, model, prompt):
+            assert "Iguana Death Cult" in prompt
+            return ok(fixture_text("gemini_generate_zebulon.json"))
+
+        def page(self, url):
+            return ok(fixture_text("event_page.html"))
+
+    from concertdb.sources import gemini
     monkeypatch.setattr(setlistfm, "Client", FakeSetlist)
     monkeypatch.setattr(pollstar, "Client", FakePollstar)
+    monkeypatch.setattr(gemini, "Client", FakeGemini)
     monkeypatch.setenv("SETLISTFM_API_KEY", "test")
+    monkeypatch.setenv("GEMINI_API_KEY", "test")
     assert smoke.run(tmp_path / "smoke", str(g), log=lambda *_: None)
     assert calls[0] == "5f647289-9ff8-494d-a349-7a388307ddde"   # the test artist, not 1,500 others
     assert "x1" not in calls
@@ -140,3 +156,21 @@ def test_run_skips_pollstar_while_its_process_runs(tmp_path, capsys, monkeypatch
     cli.main(["--db", dbp, "run", "--no-backup"])
     assert "Pollstar skipped (the separate Pollstar process is running)" in capsys.readouterr().out
     held.close()
+
+
+def test_gemini_has_its_own_lock(tmp_path, monkeypatch):
+    import pytest
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    dbp = tmp_path / "ledger.sqlite"
+    with pytest.raises(SystemExit, match="GEMINI_API_KEY"):
+        cli.main(["--db", str(dbp), "gemini"])
+    assert (tmp_path / "ledger.gemini.lock").exists()    # not ledger.lock: runs alongside `concertdb run`
+    assert not (tmp_path / "ledger.crawl.lock").exists()
+
+
+def test_gemini_max_acts_from_env(monkeypatch):
+    monkeypatch.setenv("GEMINI_MAX_ACTS", "3")
+    assert cli.build_parser().parse_args(["gemini"]).max_acts == 3
+    monkeypatch.delenv("GEMINI_MAX_ACTS")
+    assert cli.build_parser().parse_args(["gemini"]).max_acts == 1
+    assert cli.build_parser().parse_args(["gemini", "--max-acts", "2"]).max_acts == 2

@@ -10,12 +10,13 @@ claims    what ONE source says about ONE artist at ONE show:
           role (headliner/opener/unknown), position, confidence, url, extra JSON
 billings  the resolved bill, recomputed from all claims for a show
 crawl_state  one row per unit of work: next_due, adaptive interval, cursor, etag, hash
-usage     requests and $ per source per day (budgets, caps)
+usage     requests and $ per source per day (budgets, caps; Gemini's day is
+          Pacific time, when its free quota resets)
 ```
 
 Sources only ever add claims. `ledger.resolve_show()` turns claims into
 billings: each source's vote is weighted (`SOURCE_WEIGHTS`: manual 1.0,
-schema.org 0.9, setlist.fm 0.8, LLM 0.6), agreeing sources raise confidence
+schema.org 0.9, setlist.fm 0.8, Gemini/LLM 0.6), agreeing sources raise confidence
 (1 − Π(1 − c)), disagreeing ones lower it. Bills with 8+ acts are flagged as
 festivals and excluded from `opened_for`.
 
@@ -61,8 +62,9 @@ run; the cursor resumes from that page next time.
 
 ## Concurrency
 
-Two processes share the database: the daily `concertdb run` (pages,
-setlist.fm, backup) and the long-running `concertdb pollstar`. SQLite in WAL
+Three processes share the database: the daily `concertdb run` (pages,
+setlist.fm, backup) and the long-running `concertdb pollstar` and
+`concertdb gemini`. SQLite in WAL
 mode lets readers run alongside one writer; writers take turns. To keep the
 turns short:
 
@@ -76,7 +78,8 @@ turns short:
 - **Writers wait instead of failing**: connections wait up to 60 s
   (`db.BUSY_TIMEOUT`) for the other process's write to finish.
 - **One process per kind**: lock files `ledger.crawl.lock` (run, setlist.fm,
-  pages, seed) and `ledger.pollstar.lock` (Pollstar). `run` skips its Pollstar
+  pages, seed), `ledger.pollstar.lock` (Pollstar) and `ledger.gemini.lock`
+  (Gemini). `run` skips its Pollstar
   step while the Pollstar process holds its lock.
 - Backups use SQLite's backup API, which is safe while either process writes.
 
@@ -117,6 +120,49 @@ about, on a schedule, with tight limits:
   list is unchanged (hash over all pages); unchanged lists write nothing
 - any venue with a show in the last 3 years is queued for lookup, busiest first
 
+## Gemini (`concertdb/sources/gemini.py`)
+
+Fills in openers for shows already in the ledger: past shows with an act from
+the MusicSceneMap graph and at most `GEMINI_MAX_ACTS` acts listed (default 1,
+so any show with two or more acts is skipped, even one that may be missing a
+second opener), best-connected artists first. One search-grounded request per
+show asks for the headliner, the openers in order, and a quote from each page
+that names an opener, as JSON.
+
+The answer isn't trusted as given. A grounded response can cite pages the model
+didn't read, misquote them, or come back with no grounding metadata at all, so
+up to 3 cited pages are fetched (the model's evidence URLs first, then the
+grounding sources; Google's redirect links resolve to the real page, whose URL
+is stored on the claim) and each act's name is looked for on them:
+
+| Check | Confidence | × weight 0.6 | Exported at the default 0.4? |
+|---|---|---|---|
+| name found on a fetched page | 0.8 | 0.48 | yes |
+| no page could be fetched | 0.5 | 0.30 | only with another source |
+| pages fetched, name on none | 0.2 | 0.12 | no |
+
+The model saying `confident: false` multiplies these by 0.6. Each claim's
+`extra` records the model, the prompt version, the check, whether the quote
+itself was on a page, and how many searches the request made.
+
+Free tier limits (per project): 1,500 search-grounded requests a day, reset at
+midnight Pacific; per-minute limits are far above what this uses, so requests
+go one at a time, 2 s apart, and the run takes a few hours.
+
+- at most 1,400 requests per Pacific day (`usage`), leaving room for smoke
+  tests and requests made by hand
+- HTTP 429 ends the run without marking the show; it is asked next run
+- a show is asked once; if nothing is found it is asked again after 90, 180,
+  then 365 days; a show that no longer qualifies (another source added an
+  act, or `GEMINI_MAX_ACTS` was lowered) is skipped and dropped from the
+  queue, so it comes back if it qualifies again
+- `concertdb gemini` is its own process with its own lock
+  (`ledger.gemini.lock`), next to `run` and `pollstar`; it commits before each
+  Gemini request and page fetch and holds the write lock only while storing
+  (see "Concurrency")
+- responses and fetched pages are archived (`data/raw/gemini/`,
+  `data/raw/gemini-pages/`)
+
 ## Roadmap
 
 1. **Concert Archives** (concertarchives.org): fans log the shows they
@@ -131,9 +177,12 @@ about, on a schedule, with tight limits:
 3. **Gap detection**: single-act shows, tour-routing gaps (a band in Phoenix
    on the 15th and Seattle on the 22nd probably played LA in between), and
    capture–recapture estimates of missing shows per artist.
-4. **Search + Claude for gaps**: narrow questions ("who opened for X at Y on
-   date Z") answered from fetched pages; Haiku via the Batch API, cached by
-   (page hash, prompt version), hard monthly $ cap from `usage`.
+4. **More from the Gemini step**: one request per tour leg instead of per
+   show (a tour announcement often names the support for every date), which
+   would stretch the daily search quota further; and a second model (e.g.
+   Claude via the Batch API) to read the fetched pages and confirm roles,
+   cached by (page hash, prompt version), with a hard monthly $ cap from
+   `usage`.
 5. **Bandsintown** past events, if an `app_id` is granted.
 6. **MusicSceneMap import**: load `opened_for.csv` into the graph build. The
    ledger's saved Pollstar events could also serve MusicSceneMap's concert
