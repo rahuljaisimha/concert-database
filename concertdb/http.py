@@ -52,7 +52,9 @@ class Fetcher:
         self.data_dir = Path(data_dir)
         self.min_interval = min_interval
         self.session = session or requests.Session()
-        self.session.headers.setdefault("User-Agent", USER_AGENT)
+        # Not setdefault: requests.Session already has a default ("python-requests/x.y"),
+        # which many sites block outright (HTTP 403).
+        self.session.headers["User-Agent"] = USER_AGENT
         self._last = 0.0
 
     def _pace(self) -> None:
