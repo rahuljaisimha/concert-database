@@ -122,9 +122,10 @@ def ingest_setlist(conn: sqlite3.Connection, p: dict) -> int:
         conn, p["venue_name"], p["city"], p["state"], p["country"], p["lat"], p["lon"],
         source=SOURCE, native_id=p["venue_id"],
     )
-    show_id = ledger.find_or_create_show(conn, p["date"], venue_id)
     artist_id = ledger.get_or_create_artist(conn, p["artist_name"], p["artist_mbid"])
-    extra = {k: p[k] for k in ("song_count", "tour", "info", "last_updated")}
+    show_id = ledger.find_or_create_show(conn, p["date"], venue_id, [artist_id],
+                                         source=SOURCE, native_id=p["id"])
+    extra = {k: p[k] for k in ("song_count", "tour", "info", "last_updated", "date")}
     ledger.add_claim(conn, show_id, artist_id, SOURCE, p["id"], url=p["url"], extra=extra, resolve=False)
     if p["venue_id"]:
         state.ensure(conn, SOURCE, f"venue:{p['venue_id']}", priority=0)

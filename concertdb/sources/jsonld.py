@@ -137,17 +137,18 @@ def ingest_event(conn: sqlite3.Connection, e: dict, page_url: str) -> int | None
         return None
     venue_id = ledger.get_or_create_venue(conn, e["venue_name"], e["city"], e["state"],
                                           e["country"], e["lat"], e["lon"])
-    show_id = ledger.find_or_create_show(conn, e["date"], venue_id)
+    native = e["url"] or f"{page_url}#{e['date']}:{e['venue_name']}"
+    artist_ids = [ledger.get_or_create_artist(conn, name) for name in e["acts"]]
+    show_id = ledger.find_or_create_show(conn, e["date"], venue_id, artist_ids,
+                                         source=SOURCE, native_id=native)
     if e["status"] in ("cancelled", "postponed"):
         ledger.set_show_status(conn, show_id, e["status"])
-    native = e["url"] or f"{page_url}#{e['date']}:{e['venue_name']}"
     many = len(e["acts"]) >= 2
-    for i, name in enumerate(e["acts"]):
-        artist_id = ledger.get_or_create_artist(conn, name)
+    for i, artist_id in enumerate(artist_ids):
         role = ("headliner" if i == 0 else "opener") if many else "unknown"
         ledger.add_claim(conn, show_id, artist_id, SOURCE, native, role=role,
                          confidence=0.8 if many else 0.0, position=i, url=e["url"] or page_url,
-                         extra={"title": e["name"]}, resolve=False)
+                         extra={"title": e["name"], "date": e["date"]}, resolve=False)
     ledger.resolve_show(conn, show_id)
     return show_id
 
