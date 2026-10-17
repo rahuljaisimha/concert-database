@@ -21,6 +21,42 @@ from pathlib import Path
 KEEP_LOCAL = 7
 KEEP_DAILY = 7
 KEEP_WEEKLY = 8
+# Days of raw archive kept on this machine (data/raw/<source>/<day>.jsonl.gz);
+# CONCERTDB_RAW_KEEP_DAYS overrides, 0 keeps everything. The R2 copy has its own
+# 30-day lifecycle rule on raw/ (docs/HOSTING.md).
+RAW_KEEP_DAYS = 30
+
+
+def raw_keep_days() -> int:
+    v = os.environ.get("CONCERTDB_RAW_KEEP_DAYS")
+    return int(v) if v not in (None, "") else RAW_KEEP_DAYS
+
+
+def prune_raw(data_dir: Path, keep_days: int, today=None, log=print) -> int:
+    """Delete day files of the raw archive older than keep_days. Returns how many."""
+    if keep_days <= 0:
+        return 0
+    from datetime import date, timedelta
+    cutoff = ((today or datetime.now(timezone.utc).date()) - timedelta(days=keep_days)).isoformat()
+    raw = Path(data_dir) / "raw"
+    manifest_path = Path(data_dir) / "backups" / "uploaded.json"
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    removed = 0
+    for f in sorted(raw.glob("*/*.jsonl.gz")) if raw.exists() else []:
+        day = f.name.removesuffix(".jsonl.gz")
+        try:
+            date.fromisoformat(day)
+        except ValueError:
+            continue
+        if day < cutoff:
+            f.unlink()
+            manifest.pop(f.relative_to(data_dir).as_posix(), None)
+            removed += 1
+    if removed:
+        if manifest_path.exists():
+            manifest_path.write_text(json.dumps(manifest, indent=0, sort_keys=True))
+        log(f"removed {removed} raw archive file(s) older than {keep_days} days")
+    return removed
 
 
 def snapshot(conn: sqlite3.Connection, data_dir: Path) -> Path:

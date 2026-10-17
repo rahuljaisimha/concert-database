@@ -209,3 +209,29 @@ def test_no_transaction_is_open_during_network_calls(conn):
     assert gemini.ask(conn, client, **QUIET)["found"] == 1
     assert seen and not any(seen)
     assert not conn.in_transaction
+
+
+def test_evidence_pages_are_not_archived_but_a_snippet_is_kept(conn, tmp_path):
+    import gzip
+    from concertdb.http import Fetcher
+
+    class FakeSession:
+        headers = {}
+
+        def get(self, url, params=None, headers=None, timeout=None):
+            class R:
+                status_code, headers, text = 200, {}, EVENT_PAGE
+            R.url = url
+            return R()
+
+    page_fetcher = Fetcher(tmp_path, session=FakeSession())
+    real = gemini.Client(None, page_fetcher, "key")
+    show = single_act_show(conn)
+    client = FakeClient([GROUNDED])
+    client.page = real.page                        # real page fetching, fake network
+    gemini.ask(conn, client, **QUIET)
+    assert not (tmp_path / "raw" / gemini.PAGES).exists()
+    extra = json.loads(conn.execute("SELECT extra FROM claims WHERE source = 'gemini' AND artist_id = ?",
+                                    (FLAT_WORMS,)).fetchone()["extra"])
+    assert extra["check"] == "page" and "flat worms" in extra["snippet"]
+    assert len(extra["snippet"]) <= 2 * gemini.SNIPPET_CHARS + 20

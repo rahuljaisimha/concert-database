@@ -203,6 +203,8 @@ def cmd_backup(args, conn=None):
         backup.upload(snap, _data_dir(args))
     else:
         print("R2 not configured (R2_* env vars); local snapshot only")
+    # After the upload, so the newest days are in R2 before anything is removed here.
+    backup.prune_raw(_data_dir(args), backup.raw_keep_days())
 
 
 def cmd_restore(args):

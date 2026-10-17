@@ -48,7 +48,8 @@ def _retry_after(value: str | None) -> float | None:
 
 
 class Fetcher:
-    def __init__(self, data_dir: Path | str, min_interval: float = 0.0, session=None):
+    def __init__(self, data_dir: Path | str, min_interval: float = 0.0, session=None, keep_raw: bool = True):
+        self.keep_raw = keep_raw    # False: don't archive responses (see archive())
         self.data_dir = Path(data_dir)
         self.min_interval = min_interval
         self.session = session or requests.Session()
@@ -72,7 +73,10 @@ class Fetcher:
         etag: str | None = None,
         last_modified: str | None = None,
         timeout: float = 30,
+        keep_raw: bool | None = None,
     ) -> Response:
+        """keep_raw=False skips the raw archive for this response (the caller may
+        archive it later with archive(), e.g. only if it turned out to be new)."""
         h = dict(headers or {})
         if etag:
             h["If-None-Match"] = etag
@@ -90,7 +94,7 @@ class Fetcher:
             retry_after=_retry_after(r.headers.get("Retry-After")),
             url=r.url,
         )
-        if r.status_code == 200:
+        if r.status_code == 200 and (self.keep_raw if keep_raw is None else keep_raw):
             self.archive(source, r.url, params, text)
         return resp
 

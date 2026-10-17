@@ -6,7 +6,8 @@
   waiting between requests (setlist.fm: 1,400 requests ~1 s apart, slower
   after a rate-limit response).
 - **Memory:** well under 1 GB.
-- **Disk:** a few GB over the first year (database + compressed raw archive).
+- **Disk:** the database (tens of MB, growing slowly), 7 local snapshots, and
+  30 days of compressed raw archive (older days are deleted after each backup).
 - **Uptime:** it has to run *once a day*, not continuously. The optional
   Gemini step (`concertdb gemini`) runs for a few more hours a day, alongside
   the crawl.
@@ -119,6 +120,12 @@ The backup bucket should be **private**. Turn off the public `r2.dev`
 development URL on it: with it on, anyone who finds the URL can download the
 database snapshots. The crawler writes with an API token (Cloudflare dashboard →
 R2 → Manage API tokens → "Object Read & Write" limited to this bucket), which
-gives the four `R2_*` values in `.env`. If MusicSceneMap later needs a public
+gives the four `R2_*` values in `.env`.
+
+Add a lifecycle rule so the raw archive doesn't grow past the free 10 GB:
+bucket → Settings → Object lifecycle rules → Add rule, prefix `raw/`, delete
+objects 30 days after upload. Leave `snapshots/` out of it: the backup itself
+keeps 7 daily and 8 weekly snapshots, and a 30-day rule would delete the
+older weekly ones. If MusicSceneMap later needs a public
 file (e.g. the exported `opened_for` edges), publish it to the existing public
 graph bucket instead.

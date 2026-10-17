@@ -174,3 +174,21 @@ def test_gemini_max_acts_from_env(monkeypatch):
     monkeypatch.delenv("GEMINI_MAX_ACTS")
     assert cli.build_parser().parse_args(["gemini"]).max_acts == 1
     assert cli.build_parser().parse_args(["gemini", "--max-acts", "2"]).max_acts == 2
+
+
+def test_prune_raw_keeps_30_days(tmp_path):
+    import json
+    from datetime import date
+    raw = tmp_path / "raw" / "pollstar"
+    raw.mkdir(parents=True)
+    for day in ("2026-08-01", "2026-09-17", "2026-09-18", "2026-10-17"):
+        (raw / f"{day}.jsonl.gz").write_bytes(b"x")
+    (raw / "notes.jsonl.gz").write_bytes(b"x")          # not a day file: left alone
+    (tmp_path / "backups").mkdir()
+    manifest = tmp_path / "backups" / "uploaded.json"
+    manifest.write_text(json.dumps({"raw/pollstar/2026-08-01.jsonl.gz": 1, "raw/pollstar/2026-10-17.jsonl.gz": 1}))
+    n = backup.prune_raw(tmp_path, 30, today=date(2026, 10, 18), log=lambda *_: None)
+    assert n == 2
+    assert sorted(p.name for p in raw.iterdir()) == ["2026-09-18.jsonl.gz", "2026-10-17.jsonl.gz", "notes.jsonl.gz"]
+    assert json.loads(manifest.read_text()) == {"raw/pollstar/2026-10-17.jsonl.gz": 1}
+    assert backup.prune_raw(tmp_path, 0, today=date(2027, 1, 1), log=lambda *_: None) == 0   # 0 keeps all

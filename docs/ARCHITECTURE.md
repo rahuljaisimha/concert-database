@@ -69,8 +69,24 @@ Otherwise roles stay unknown (the show still counts as "played together").
   something changes.
 - Pages are fetched with `If-None-Match` / `If-Modified-Since`, and an unchanged
   content hash counts as unchanged.
-- Every response is archived (`data/raw/<source>/<day>.jsonl.gz`) so parsers
-  and prompts can be re-run without refetching.
+- Responses are archived (`data/raw/<source>/<day>.jsonl.gz`) so parsers and
+  prompts can be re-run without refetching, for 30 days (see "Raw archive").
+
+## Raw archive
+
+The archive is for re-parsing recent responses, building test fixtures and
+debugging, not a permanent record: the ledger keeps every fact with its
+source, and claims keep their own event date. So it is kept short:
+
+- **30 days** on this machine (`backup.prune_raw`, at the end of each backup;
+  `CONCERTDB_RAW_KEEP_DAYS`, 0 = keep everything) and in R2 (a lifecycle
+  rule deletes `raw/` objects after 30 days; see docs/HOSTING.md).
+- **Pollstar event lists** are archived only when they changed; an unchanged
+  recheck stores nothing. Venue lookups (autocomplete) are always archived;
+  `pollstar-rematch` uses them.
+- **Gemini evidence pages are not archived.** The claim keeps a snippet of
+  the page text around the matched name (`extra.snippet`). Gemini's own
+  answers are archived (`data/raw/gemini/`).
 
 ## Rate limits
 
@@ -186,8 +202,8 @@ go one at a time, 2 s apart, and the run takes a few hours.
   (`ledger.gemini.lock`), next to `run` and `pollstar`; it commits before each
   Gemini request and page fetch and holds the write lock only while storing
   (see "Concurrency")
-- responses and fetched pages are archived (`data/raw/gemini/`,
-  `data/raw/gemini-pages/`)
+- Gemini's answers are archived (`data/raw/gemini/`); fetched evidence pages
+  are not, and the claim keeps a snippet around the matched name instead
 
 ## Roadmap
 
