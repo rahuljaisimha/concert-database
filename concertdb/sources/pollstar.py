@@ -26,12 +26,15 @@ Units of work:
 processes can share the database (see db.begin_write).
 """
 
+import gzip
 import hashlib
+import html
 import json
 import os
 import sqlite3
 import time
 from datetime import date, timedelta
+from pathlib import Path
 
 import requests
 
@@ -74,11 +77,16 @@ def user_agent() -> str | None:
 
 # ---------------------------------------------------------------- parsing
 
+def _text(s: str | None) -> str | None:
+    """Pollstar's autocomplete HTML-escapes names ("Stubb&#39;s", "Bar &amp; Grill")."""
+    return html.unescape(s) if s else s
+
+
 def parse_venues(raw: dict) -> list[dict]:
     docs = (raw.get("response") or {}).get("docs") or []
     out = [
-        {"id": str(d["EntityId"]), "name": d.get("ListName") or "", "city": d.get("City"),
-         "state": d.get("State"), "location": d.get("Location"), "rank": d.get("Rank") or 0}
+        {"id": str(d["EntityId"]), "name": _text(d.get("ListName")) or "", "city": _text(d.get("City")),
+         "state": _text(d.get("State")), "location": _text(d.get("Location")), "rank": d.get("Rank") or 0}
         for d in docs if d.get("EntityType") == "Venue" and d.get("EntityId") is not None
     ]
     return sorted(out, key=lambda v: -v["rank"])
@@ -104,10 +112,11 @@ def parse_events(raw: dict) -> list[dict]:
         out.append({
             "id": str(e["id"]),
             "date": str(e["playDate"])[:10],
-            "name": e.get("name"),
+            "name": _text(e.get("name")),
             "url": e.get("url"),
             "is_festival": bool(e.get("isFestival")),
-            "artists": [{"name": a["name"].strip(), "headline": bool(a.get("isHeadline"))} for a in artists],
+            "artists": [{"name": _text(a["name"]).strip(), "headline": bool(a.get("isHeadline"))}
+                        for a in artists],
         })
     return out
 
@@ -198,6 +207,49 @@ def add_venue(conn: sqlite3.Connection, client: Client, name: str, city: str | N
     if v:
         _link(conn, v)
     return v
+
+
+def rematch_archived(conn: sqlite3.Connection, data_dir, log=print) -> dict:
+    """Retry venue lookups that found no match, using the autocomplete answers already
+    in the raw archive (no requests). For lookups made before names were un-escaped:
+    "Stubb&#39;s" never matched "Stubb's"."""
+    from urllib.parse import unquote, urlparse
+    answers: dict[str, str] = {}   # query → newest archived autocomplete body
+    for f in sorted((Path(data_dir) / "raw" / SOURCE).glob("*.jsonl.gz")):
+        with gzip.open(f, "rt", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                url = rec.get("url") or ""
+                if "autocomplete." in url:
+                    answers[unquote(urlparse(url).path.rsplit("/", 1)[-1])] = rec.get("body") or ""
+    stats = {"misses": 0, "archived": 0, "matched": 0}
+    db.begin_write(conn)
+    rows = conn.execute(
+        "SELECT cs.key, v.id, v.name, v.city FROM crawl_state cs"
+        " JOIN venues v ON cs.key = 'resolve:' || v.id"
+        " WHERE cs.source = ? AND cs.interval_days = ? AND v.id NOT IN"
+        " (SELECT venue_id FROM venue_source_ids WHERE source = ?)",
+        (SOURCE, NO_MATCH_DAYS, SOURCE)).fetchall()
+    for r in rows:
+        stats["misses"] += 1
+        body = answers.get(r["name"])
+        if body is None:
+            continue
+        stats["archived"] += 1
+        try:
+            match = match_venue(parse_venues(json.loads(body)), r["name"], r["city"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if match:
+            _link(conn, match, r["id"])
+            state.postpone(conn, SOURCE, r["key"], 10 * 365)
+            stats["matched"] += 1
+            log(f"  {r['name']}, {r['city']} → pollstar {match['id']}")
+    conn.commit()
+    return stats
 
 
 def _link(conn: sqlite3.Connection, v: dict, venue_id: int | None = None) -> int:

@@ -135,7 +135,11 @@ about, on a schedule, with tight limits:
   for lookup every 30 minutes, so a run lasting hours picks up what setlist.fm
   found that day
 - each venue's name is looked up once; the match (or the miss) is stored and
-  not asked again (misses are retried after a year)
+  not asked again (misses are retried after a year). Autocomplete names come
+  HTML-escaped ("Stubb&#39;s", "Bar &amp; Grill") and are un-escaped before
+  matching (`normalize.norm` also un-escapes, for any source);
+  `concertdb pollstar-rematch` re-checks earlier misses against the archived
+  answers without new requests
 - event lists are fetched 1,000 events a page (the website uses 50), so a
   venue's upcoming shows are almost always one request
 - event lists are rechecked every 3 days, backing off to 14 days when the
