@@ -131,6 +131,10 @@ def cmd_pollstar(args):
     print(pollstar.capture(conn, _pollstar_client(args), max_requests=args.max_requests))
 
 
+def cmd_pollstar_rematch(args):
+    print(pollstar.rematch_archived(_conn(args), _data_dir(args)))
+
+
 def cmd_crawl_setlistfm(args):
     conn = _conn(args)
     stats = setlistfm.crawl(conn, _setlistfm_client(args), max_requests=args.max_requests)
@@ -295,6 +299,10 @@ def build_parser() -> argparse.ArgumentParser:
                        " deploy/run-pollstar.sh runs it daily next to `run`)")
     s.add_argument("--max-requests", type=int, default=pollstar.DAILY_LIMIT)
     s.set_defaults(fn=cmd_pollstar, locked="pollstar")
+
+    s = sub.add_parser("pollstar-rematch", help="retry Pollstar venue lookups that found no match,"
+                       " from archived answers (no requests)")
+    s.set_defaults(fn=cmd_pollstar_rematch, locked="pollstar")
 
     s = sub.add_parser("crawl-setlistfm", help="spend setlist.fm requests on due artists/venues")
     s.add_argument("--max-requests", type=int, default=setlistfm.DAILY_LIMIT)

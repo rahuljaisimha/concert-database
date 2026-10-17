@@ -1,5 +1,6 @@
 """Name normalization used to match artists and venues across sources."""
 
+import html
 import re
 import unicodedata
 
@@ -11,7 +12,8 @@ def norm(name: str | None) -> str:
     """'The Oh Sees' → 'oh sees', 'Beyoncé & Co.' → 'beyonce and co'."""
     if not name:
         return ""
-    s = unicodedata.normalize("NFKD", name)
+    s = html.unescape(name)  # some sources send "Stubb&#39;s", "Bar &amp; Grill"
+    s = unicodedata.normalize("NFKD", s)
     s = "".join(c for c in s if not unicodedata.combining(c))
     s = s.lower().replace("&", " and ")
     s = _PUNCT.sub(" ", s)
