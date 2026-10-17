@@ -176,7 +176,13 @@ class Client:
             "fromDate": today.strftime("%m-%d-%Y"), "toDate": to.strftime("%m-%d-%Y"),
             "sortAscending": "true", "sortColumn": "playdate", "newOnly": "false",
         }
-        return self.fetcher.get(SOURCE, EVENTS.format(id=pollstar_id), params=params, headers=self.headers)
+        # Not archived here: _fetch_venue archives the pages only if the list changed.
+        return self.fetcher.get(SOURCE, EVENTS.format(id=pollstar_id), params=params, headers=self.headers,
+                                keep_raw=False)
+
+    def keep(self, url: str, text: str) -> None:
+        """Archive an event-list page (after it turned out to be new)."""
+        self.fetcher.archive(SOURCE, url, None, text)
 
 
 # ------------------------------------------------------------- scheduling
@@ -376,7 +382,7 @@ def _fetch_venue(conn, get, client, row, pollstar_id, stats, budget_left, log) -
     if not venue:
         state.postpone(conn, SOURCE, row["key"], NO_MATCH_DAYS)
         return
-    events, digest = [], hashlib.sha256()
+    events, digest, raw_pages = [], hashlib.sha256(), []
     page, total_pages = 0, 1
     while page < min(total_pages, MAX_PAGES):
         if not budget_left():
@@ -387,6 +393,7 @@ def _fetch_venue(conn, get, client, row, pollstar_id, stats, budget_left, log) -
             state.mark_failed(conn, SOURCE, row["key"])
             return
         raw = resp.json()
+        raw_pages.append((resp.url or EVENTS.format(id=pollstar_id), resp.text))
         digest.update(resp.text.encode())
         events += parse_events(raw)
         total_pages = int(raw.get("totalPages") or 1)
@@ -398,6 +405,9 @@ def _fetch_venue(conn, get, client, row, pollstar_id, stats, budget_left, log) -
         state.mark_checked(conn, SOURCE, row["key"], changed=False,
                            min_days=RECHECK_MIN_DAYS, max_days=RECHECK_MAX_DAYS)
         return
+    if hasattr(client, "keep"):   # unchanged lists are not archived again
+        for url, text in raw_pages:
+            client.keep(url, text)
     for e in events:
         ingest_event(conn, e, venue["venue_id"])
     stats["events"] += len(events)

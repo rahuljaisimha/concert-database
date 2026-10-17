@@ -264,3 +264,26 @@ def test_rematch_earlier_misses_from_archive(conn, tmp_path):
                         ).fetchone()[0] == v
     assert state.get(conn, "pollstar", "venue:300487") is not None        # its event list is now due
     assert pollstar.rematch_archived(conn, tmp_path, log=lambda *_: None)["matched"] == 0
+
+
+def test_unchanged_event_lists_are_not_archived_again(conn, tmp_path):
+    from concertdb.http import Fetcher
+
+    class FakeSession:
+        headers = {}
+
+        def get(self, url, params=None, headers=None, timeout=None):
+            class R:
+                status_code, headers, text = 200, {}, fixture_text("pollstar_events_zebulon.json")
+            R.url = url
+            return R()
+
+    client = pollstar.Client(Fetcher(tmp_path, session=FakeSession()))
+    _watch_zebulon(conn)
+    pollstar.capture(conn, client, log=lambda *_: None)            # new list: archived
+    day_files = list((tmp_path / "raw" / "pollstar").glob("*.jsonl.gz"))
+    assert len(day_files) == 1
+    size = day_files[0].stat().st_size
+    conn.execute("UPDATE crawl_state SET next_due = '2000-01-01' WHERE key = 'venue:501234'")
+    stats = pollstar.capture(conn, client, log=lambda *_: None)    # same list again: not archived
+    assert stats["unchanged"] == 1 and day_files[0].stat().st_size == size

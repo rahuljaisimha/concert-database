@@ -85,7 +85,9 @@ See docs/HOSTING.md.
 
 `concertdb run` ends with a backup: a consistent snapshot of the database plus
 the raw response archive, uploaded to a Cloudflare R2 bucket when the `R2_*`
-variables are set (7 daily + 8 weekly snapshots kept). On a new machine,
+variables are set (7 daily + 8 weekly snapshots kept). The raw archive is kept
+for 30 days, locally and in R2 (see "Raw archive" in docs/ARCHITECTURE.md).
+On a new machine,
 `concertdb restore` downloads the newest snapshot and the archive, and the
 crawl continues where it stopped.
 

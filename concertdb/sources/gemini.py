@@ -36,7 +36,8 @@ from ..http import Fetcher
 from ..normalize import norm
 
 SOURCE = "gemini"
-PAGES = "gemini-pages"      # raw archive for the evidence pages fetched to check answers
+PAGES = "gemini-pages"      # source name for evidence-page fetches (not archived: see Client.page)
+SNIPPET_CHARS = 160         # page text kept on each side of a matched name, in the claim
 API = "https://generativelanguage.googleapis.com/v1beta"
 DAILY_LIMIT = 1400          # of the free tier's 1,500; leaves room for smoke tests and hand runs
 MIN_INTERVAL = 2.0
@@ -166,7 +167,9 @@ class Client:
                                       headers=self.headers)
 
     def page(self, url: str):
-        return self.page_fetcher.get(PAGES, url)
+        # Whole pages would be most of the archive (~100+ KB each); the claim keeps
+        # a snippet around the matched name instead.
+        return self.page_fetcher.get(PAGES, url, keep_raw=False)
 
 
 # ------------------------------------------------------------- scheduling
@@ -287,14 +290,15 @@ def _ask(conn, client, model, row, max_acts, stats, log) -> str:
     acts = ([(answer["headliner"], "headliner")] if answer["headliner"] else []) + [
         (o, "opener") for o in answer["openers"] if norm(o) != norm(answer["headliner"])]
     for pos, (name, role) in enumerate(acts):
-        check, url = _check(name, pages)
+        check, url, snippet = _check(name, pages)
         conf = {"page": CONF_VERIFIED, "absent": CONF_ABSENT, "unchecked": CONF_UNCHECKED}[check]
         if not answer["confident"]:
             conf *= UNSURE_FACTOR
         quotes = [e["quote"] for e in answer["evidence"] if mentions(f" {norm(e['quote'])} ", name)]
         extra = {"model": model, "prompt_version": PROMPT_VERSION, "check": check,
                  "quote_on_page": any(mentions(p["words"], q) for q in quotes for p in pages),
-                 "grounded": bool(r["sources"]), "search_queries": len(r["queries"])}
+                 "grounded": bool(r["sources"]), "search_queries": len(r["queries"]),
+                 **({"snippet": snippet} if snippet else {})}
         aid = ledger.get_or_create_artist(conn, name)
         ledger.add_claim(conn, show_id, aid, SOURCE, key, role=role, confidence=round(conf, 3),
                          position=pos, url=url or _first_url(answer, r["sources"]),
@@ -326,11 +330,14 @@ def _fetch_evidence(client, answer, sources) -> list[dict]:
     return pages
 
 
-def _check(name: str, pages: list[dict]) -> tuple[str, str | None]:
+def _check(name: str, pages: list[dict]) -> tuple[str, str | None, str | None]:
+    """(check, url of the page naming the act, normalized text around the name)."""
     for p in pages:
         if mentions(p["words"], name):
-            return "page", p["url"]
-    return ("absent" if pages else "unchecked"), None
+            i = p["words"].find(f" {norm(name)} ")
+            snippet = p["words"][max(0, i - SNIPPET_CHARS): i + len(norm(name)) + 2 + SNIPPET_CHARS].strip()
+            return "page", p["url"], snippet
+    return ("absent" if pages else "unchecked"), None, None
 
 
 def _first_url(answer, sources) -> str | None:
