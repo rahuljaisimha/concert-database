@@ -192,3 +192,54 @@ def test_prioritized_artists_are_not_capped(conn, monkeypatch):
     client = FakeSetlistClient({("artist", OSEES): _pages(3)})
     setlistfm.crawl(conn, client, max_requests=10, log=lambda *_: None)
     assert [c[2] for c in client.calls if c[0] == "artist"] == [1, 2, 3]
+
+
+def test_interrupted_recheck_resumes_at_its_page(conn):
+    """A recheck stopped after page 1 continues at page 2, not page 1 (now all known)."""
+    key = f"artist:{OSEES}"
+    state.ensure(conn, "setlistfm", key)
+    state.save_cursor(conn, "setlistfm", key, {"backfill_done": True})
+    pages = [setlist_page([_sl(i)], total=3, page=i, per_page=1) for i in (1, 2, 3)]
+    client = FakeSetlistClient({("artist", OSEES): pages})
+    setlistfm.crawl(conn, client, max_requests=1, log=lambda *_: None)
+    assert state.get_cursor(state.get(conn, "setlistfm", key)) == {"backfill_done": True, "recheck_page": 2}
+
+    client.calls.clear()
+    conn.execute("DELETE FROM crawl_state WHERE key LIKE 'venue:%'")
+    setlistfm.crawl(conn, client, max_requests=10, log=lambda *_: None)
+    assert [c[2] for c in client.calls if c[0] == "artist"] == [2, 3]
+    row = state.get(conn, "setlistfm", key)
+    assert state.get_cursor(row) == {"backfill_done": True}
+    assert row["interval_days"] == setlistfm.RECHECK_MIN_DAYS   # counted as changed
+
+
+def test_no_write_lock_held_during_requests_or_backoff(tmp_path, monkeypatch):
+    import sqlite3
+
+    from concertdb import db
+    path = tmp_path / "ledger.sqlite"
+    conn = db.connect(path)
+    checks = []
+
+    def check(*_):
+        other = sqlite3.connect(path, timeout=0.1)
+        other.execute("BEGIN IMMEDIATE")   # "database is locked" if this process held the lock
+        other.rollback()
+        other.close()
+        checks.append(1)
+
+    monkeypatch.setattr(setlistfm, "sleep", check)
+    state.ensure(conn, "setlistfm", f"artist:{OSEES}")
+    conn.commit()
+
+    class Checking(SequenceClient):
+        def page(self, kind, ident, page):
+            check()
+            return super().page(kind, ident, page)
+
+    pages = [setlist_page([_sl(1), _sl(2)], total=4, per_page=2),
+             status(429),
+             setlist_page([_sl(3), _sl(4)], total=4, page=2, per_page=2)]
+    stats = setlistfm.crawl(conn, Checking(pages), max_requests=10, log=lambda *_: None)
+    assert stats["new"] == 4
+    assert len(checks) >= 4   # page 1, page 2 (429), backoff sleep, page 2, then the venues found

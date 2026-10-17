@@ -10,6 +10,10 @@ Units of work in crawl_state:
 First visit pages through the full history (resuming across days if the daily
 budget runs out). Later visits read newest-first and stop at the first page
 with nothing new.
+
+Nothing is held open while waiting on the network: the transaction is
+committed before every request and every backoff sleep, so other processes
+(the Pollstar crawler) can write in between. See db.begin_write.
 """
 
 import json
@@ -17,7 +21,7 @@ import sqlite3
 import time
 from datetime import datetime
 
-from .. import ledger, state
+from .. import db, ledger, state
 from ..http import Fetcher
 from ..infer import SetlistFacts, infer_bill
 
@@ -183,8 +187,11 @@ def _crawl_unit(conn, client, row, stats, budget_left, log) -> None:
     backfill = not cursor.get("backfill_done")
     deep = bool(cursor.get("deep"))
     capped = backfill and not deep and row["priority"] < NO_CAP_PRIORITY
-    page = cursor.get("next_page", 1) if backfill else 1
-    any_new = False
+    # A recheck that stopped part-way (budget, rate limit, crash) resumes at the
+    # page it reached: the pages before it are stored, so starting again from
+    # page 1 would find nothing new there and stop before reaching the rest.
+    page = cursor.get("next_page", 1) if backfill else cursor.get("recheck_page", 1)
+    any_new = not backfill and page > 1   # resumed: an earlier page had new setlists
     stats["units"] += 1
 
     while budget_left():
@@ -193,7 +200,9 @@ def _crawl_unit(conn, client, row, stats, budget_left, log) -> None:
             stats["deferred"] = stats.get("deferred", 0) + 1
             log(f"  {key}: newest {FIRST_PASS_PAGES} pages done; older history queued for the deep pass")
             return
+        conn.commit()  # never hold the write lock across a request
         resp = client.page(kind, ident, page)
+        db.begin_write(conn)
         stats["requests"] += 1
         state.record_usage(conn, SOURCE)
         if resp.status == 404:
@@ -210,6 +219,7 @@ def _crawl_unit(conn, client, row, stats, budget_left, log) -> None:
             log(f"  {key}: HTTP 429 {resp.text[:200]!r}; waiting {wait:.0f}s"
                 + (f", then {interval:.1f}s between requests" if interval else ""))
             stats["_streak"] = streak + 1
+            conn.commit()
             sleep(wait)
             continue  # same page again
         stats["_streak"] = 0
@@ -248,8 +258,10 @@ def _crawl_unit(conn, client, row, stats, budget_left, log) -> None:
         else:
             # Newest first: a page with nothing new means we've caught up.
             if last_page or new_on_page == 0:
+                state.save_cursor(conn, SOURCE, key, {"backfill_done": True})
                 break
             page += 1
+            state.save_cursor(conn, SOURCE, key, {"backfill_done": True, "recheck_page": page})
     else:
         # Budget ran out mid-unit; it stays due and resumes from the cursor.
         return

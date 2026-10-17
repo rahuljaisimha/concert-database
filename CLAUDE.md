@@ -22,6 +22,9 @@ a change affects what they describe.
 - Sources add claims via `ledger.add_claim`; never write `billings` directly.
 - Every network source registers units of work in `crawl_state` and records
   requests/spend in `usage`. Respect each source's rate limit and daily cap.
+- Two crawler processes share the database. Commit before every network
+  request or sleep, and call `db.begin_write(conn)` when the response is in
+  (see "Concurrency" in docs/ARCHITECTURE.md).
 - Keep SQL portable (see "Moving to Postgres later" in docs/ARCHITECTURE.md).
 - Tests are offline. New parsers get a fixture in `tests/fixtures/` (say in its
   README whether it was captured or hand-written).

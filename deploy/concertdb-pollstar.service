@@ -1,0 +1,19 @@
+# The Pollstar crawler as its own long process (~1 request/second for hours),
+# next to concertdb.service. Started daily by concertdb-pollstar.timer.
+#
+# Install alongside concertdb.service / concertdb.timer (see that file):
+#   cp deploy/concertdb-pollstar.service deploy/concertdb-pollstar.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now concertdb-pollstar.timer
+[Unit]
+Description=concert-database Pollstar capture
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/concert-database
+EnvironmentFile=%h/concert-database/.env
+ExecStart=%h/concert-database/.venv/bin/concertdb pollstar
+Nice=10
+TimeoutStartSec=23h

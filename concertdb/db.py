@@ -9,6 +9,10 @@ import sqlite3
 from pathlib import Path
 
 SCHEMA_VERSION = 1
+# How long a writer waits for another process's write to finish (seconds).
+# Separate crawler processes share the database; see "Concurrency" in
+# docs/ARCHITECTURE.md.
+BUSY_TIMEOUT = 60.0
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -130,7 +134,7 @@ def connect(path: str | Path) -> sqlite3.Connection:
     path = Path(path)
     if str(path) != ":memory:":
         path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), timeout=BUSY_TIMEOUT)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     if str(path) != ":memory:":
@@ -143,3 +147,16 @@ def connect(path: str | Path) -> sqlite3.Connection:
     )
     conn.commit()
     return conn
+
+
+def begin_write(conn: sqlite3.Connection) -> None:
+    """Take the write lock now, unless this connection already holds a transaction.
+
+    Use it right after a network response, before reading what to write: with
+    BEGIN IMMEDIATE the read-then-insert steps (find or create a venue, an
+    artist, a show) can't interleave with another process doing the same, so
+    two crawlers never create the same venue twice. Commit before the next
+    network request or sleep, so the lock is never held while waiting.
+    """
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")

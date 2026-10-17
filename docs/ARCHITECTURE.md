@@ -59,6 +59,32 @@ setlist.fm requests start at least 1 s apart. On HTTP 429 the crawler waits
 same page. Five 429s in a row is treated as the daily limit and ends the
 run; the cursor resumes from that page next time.
 
+## Concurrency
+
+Two processes share the database: the daily `concertdb run` (pages,
+setlist.fm, backup) and the long-running `concertdb pollstar`. SQLite in WAL
+mode lets readers run alongside one writer; writers take turns. To keep the
+turns short:
+
+- **No lock is held while waiting.** Each source commits before every network
+  request and every backoff sleep (`conn.commit()`), then takes the write lock
+  again when the response is in (`db.begin_write`). The write lock is only
+  held while a response is being stored, milliseconds at a time.
+- **Find-or-create is serialized.** `db.begin_write` uses `BEGIN IMMEDIATE`,
+  so looking up a venue, artist or show and inserting it if missing can't
+  interleave with the other process doing the same: no duplicate venues.
+- **Writers wait instead of failing**: connections wait up to 60 s
+  (`db.BUSY_TIMEOUT`) for the other process's write to finish.
+- **One process per kind**: lock files `ledger.crawl.lock` (run, setlist.fm,
+  pages, seed) and `ledger.pollstar.lock` (Pollstar). `run` skips its Pollstar
+  step while the Pollstar process holds its lock.
+- Backups use SQLite's backup API, which is safe while either process writes.
+
+Because work is committed page by page, a setlist.fm recheck that stops
+part-way (budget, rate limit, crash) saves the page it reached in its cursor
+(`recheck_page`) and resumes there: starting again from page 1 would find
+nothing new and stop before the pages it never read.
+
 ## Moving to Postgres later
 
 Tables are `STRICT`, dates are ISO-8601 text, booleans are 0/1 integers with
@@ -74,7 +100,17 @@ saved before the show. MusicSceneMap queries it only when someone asks for
 concert recommendations; this crawler queries every venue the ledger knows
 about, on a schedule, with tight limits:
 
-- one request every 2 s, at most 300 a day
+- its own long process (`concertdb pollstar`, started daily next to `run`):
+  one request a second, at most 20,000 a day (`POLLSTAR_INTERVAL`,
+  `POLLSTAR_DAILY_LIMIT` in `.env`); `run` itself spends at most 300 when the
+  Pollstar process isn't running
+- pushback (HTTP 403, 429, 503 or a network error) waits (`Retry-After`, else
+  30 s, 60 s, 120 s, 300 s, 600 s), slows to 1.5× the interval for the rest of
+  the run (capped at 10 s) and retries; six in a row pauses Pollstar for 12
+  hours for every process, so a block isn't made worse
+- the due list is re-read every 200 units and newly found venues are queued
+  for lookup every 30 minutes, so a run lasting hours picks up what setlist.fm
+  found that day
 - each venue's name is looked up once; the match (or the miss) is stored and
   not asked again (misses are retried after a year)
 - event lists are rechecked every 3 days, backing off to 14 days when the
