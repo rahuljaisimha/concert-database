@@ -4,5 +4,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 set -a; . ./.env; set +a
+export PYTHONUNBUFFERED=1   # write log lines as they happen, not at the end
 mkdir -p data
 { echo "=== $(date -u +%FT%TZ)"; .venv/bin/concertdb run; } >> data/run.log 2>&1
