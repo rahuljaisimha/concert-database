@@ -204,3 +204,16 @@ def test_no_write_lock_held_during_requests_or_backoff(tmp_path, monkeypatch):
     stats = pollstar.capture(conn, client, log=lambda *_: None)
     assert stats["events"] == 3
     assert len(checks) == 4   # autocomplete, events (429), backoff sleep, events
+
+
+def test_events_request_one_large_page():
+    class Recorder:
+        params = None
+
+        def get(self, source, url, params=None, headers=None, **kw):
+            self.params = params
+            return EV
+
+    rec = Recorder()
+    pollstar.Client(rec).events("501234", 0)
+    assert rec.params["pageSize"] == "1000" and rec.params["page"] == "0"

@@ -136,6 +136,8 @@ about, on a schedule, with tight limits:
   found that day
 - each venue's name is looked up once; the match (or the miss) is stored and
   not asked again (misses are retried after a year)
+- event lists are fetched 1,000 events a page (the website uses 50), so a
+  venue's upcoming shows are almost always one request
 - event lists are rechecked every 3 days, backing off to 14 days when the
   list is unchanged (hash over all pages); unchanged lists write nothing
 - any venue with a show in the last 3 years is queued for lookup, busiest first

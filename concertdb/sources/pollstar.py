@@ -54,7 +54,10 @@ PAUSE_HOURS = 12            # after being stopped, no Pollstar requests from any
 sleep = time.sleep          # replaced in tests
 DUE_BATCH = 200             # re-read what's due this often, so a long run sees new work
 REQUEUE_SECONDS = 1800      # look for newly found venues to resolve every 30 min
-PAGE_SIZE = 50
+# The website asks for 50 events a page; the API accepts more (tested: pageSize
+# 100 returned 61 events in one page, 1000 is accepted), so nearly every venue's
+# upcoming list is a single request. MAX_PAGES still bounds a runaway listing.
+PAGE_SIZE = 1000
 MAX_PAGES = 10
 YEARS_AHEAD = 2
 RECHECK_MIN_DAYS = 3
