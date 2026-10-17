@@ -30,6 +30,13 @@ MAX_INTERVAL = 5.0
 # After this many 429s in a row it's probably the daily limit: stop the run.
 BACKOFF_SECONDS = (10, 30, 60, 120)
 sleep = time.sleep          # replaced in tests
+# First pass reads only an artist's newest FIRST_PASS_PAGES pages (20 setlists
+# each), so many artists get coverage quickly. The rest of their history is
+# finished later in a deep pass at DEEP_PRIORITY, after every first pass.
+# Artists you prioritized (USER_PRIORITY) always get their full history at once.
+FIRST_PASS_PAGES = 10
+DEEP_PRIORITY = 0
+NO_CAP_PRIORITY = 1_000_000
 RECHECK_MIN_DAYS = 14
 RECHECK_MAX_DAYS = 180
 NOT_FOUND_DAYS = 180
@@ -174,11 +181,18 @@ def _crawl_unit(conn, client, row, stats, budget_left, log) -> None:
     kind, ident = key.split(":", 1)
     cursor = state.get_cursor(row)
     backfill = not cursor.get("backfill_done")
+    deep = bool(cursor.get("deep"))
+    capped = backfill and not deep and row["priority"] < NO_CAP_PRIORITY
     page = cursor.get("next_page", 1) if backfill else 1
     any_new = False
     stats["units"] += 1
 
     while budget_left():
+        if capped and page > FIRST_PASS_PAGES:
+            state.defer_deep_pass(conn, SOURCE, key, {"deep": True, "next_page": page}, DEEP_PRIORITY)
+            stats["deferred"] = stats.get("deferred", 0) + 1
+            log(f"  {key}: newest {FIRST_PASS_PAGES} pages done; older history queued for the deep pass")
+            return
         resp = client.page(kind, ident, page)
         stats["requests"] += 1
         state.record_usage(conn, SOURCE)
@@ -229,7 +243,7 @@ def _crawl_unit(conn, client, row, stats, budget_left, log) -> None:
                 state.save_cursor(conn, SOURCE, key, {"backfill_done": True})
                 break
             page += 1
-            state.save_cursor(conn, SOURCE, key, {"next_page": page})
+            state.save_cursor(conn, SOURCE, key, {"next_page": page, **({"deep": True} if deep else {})})
             conn.commit()
         else:
             # Newest first: a page with nothing new means we've caught up.

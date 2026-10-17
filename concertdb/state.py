@@ -94,6 +94,15 @@ def postpone(conn: sqlite3.Connection, source: str, key: str, days: float) -> No
     )
 
 
+def defer_deep_pass(conn: sqlite3.Connection, source: str, key: str, cursor: dict, priority: int) -> None:
+    """First pass done: count it as checked, keep it due at a lower priority to finish later."""
+    conn.execute(
+        "UPDATE crawl_state SET cursor = ?, priority = ?, last_checked = ?, failures = 0"
+        " WHERE source = ? AND key = ?",
+        (json.dumps(cursor, sort_keys=True), priority, _iso(_now()), source, key),
+    )
+
+
 def mark_failed(conn: sqlite3.Connection, source: str, key: str) -> None:
     """Retry later with exponential backoff: 1h, 2h, 4h ... capped at 7 days."""
     row = get(conn, source, key)

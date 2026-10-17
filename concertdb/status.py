@@ -25,6 +25,9 @@ def summary(conn: sqlite3.Connection) -> dict:
         "groups_in_graph": one("SELECT COUNT(*) FROM artists WHERE in_graph = 1 AND type = 'group'"),
         "claims_by_source": dict(conn.execute(
             "SELECT source, COUNT(*) FROM claims GROUP BY source").fetchall()),
+        "setlistfm_deep_pending": one(
+            "SELECT COUNT(*) FROM crawl_state WHERE source = 'setlistfm'"
+            " AND cursor LIKE '%\"deep\": true%' AND cursor NOT LIKE '%backfill_done%'"),
         "usd_this_month": round(state.usd_this_month(conn), 2),
         "crawl": {},
     }
@@ -62,4 +65,6 @@ def format_summary(s: dict) -> str:
             f"  {src:<10} {c['checked']:,}/{c['total']:,} checked, {c['due']:,} due,"
             f" {c['failing']:,} failing, {c['requests_today']:,} requests today"
         )
+        if src == "setlistfm" and s["setlistfm_deep_pending"]:
+            lines.append(f"             {s['setlistfm_deep_pending']:,} with older history still to fetch (deep pass)")
     return "\n".join(lines)

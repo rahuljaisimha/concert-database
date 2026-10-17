@@ -17,7 +17,7 @@ from .sources import setlistfm
 BAND_RELS = ("member_of", "former_member_of", "support_musician")
 DEGREE_CAP = 12
 GROUP_BONUS = 1_000
-USER_PRIORITY = 1_000_000
+USER_PRIORITY = setlistfm.NO_CAP_PRIORITY   # also exempts the artist from the first-pass page cap
 
 
 def _open_graph(path: Path) -> tuple[sqlite3.Connection, Path | None]:
