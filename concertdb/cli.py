@@ -148,7 +148,7 @@ def _gemini_client(args):
 
 def cmd_gemini(args):
     conn = _conn(args)
-    print(gemini.ask(conn, _gemini_client(args), max_requests=args.max_requests))
+    print(gemini.ask(conn, _gemini_client(args), max_requests=args.max_requests, max_acts=args.max_acts))
 
 
 def cmd_run(args):
@@ -293,6 +293,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("gemini", help="ask Gemini (with Google Search) for openers of shows that lack one")
     s.add_argument("--max-requests", type=int, default=gemini.DAILY_LIMIT)
     s.add_argument("--model", help="default: $GEMINI_MODEL, else the newest stable Flash")
+    s.add_argument("--max-acts", type=int, default=int(os.environ.get("GEMINI_MAX_ACTS") or gemini.MAX_ACTS),
+                   help="only ask about shows with at most this many acts listed"
+                        f" (default: $GEMINI_MAX_ACTS, else {gemini.MAX_ACTS})")
     s.set_defaults(fn=cmd_gemini, locked="gemini")
 
     s = sub.add_parser("run", help="one scheduled cycle: watched pages, setlist.fm, Pollstar, backup")

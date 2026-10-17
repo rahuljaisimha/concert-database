@@ -121,8 +121,9 @@ about, on a schedule, with tight limits:
 ## Gemini (`concertdb/sources/gemini.py`)
 
 Fills in openers for shows already in the ledger: past shows with an act from
-the MusicSceneMap graph and no opener yet (one act listed, or acts whose roles
-are unknown), best-connected artists first. One search-grounded request per
+the MusicSceneMap graph and at most `GEMINI_MAX_ACTS` acts listed (default 1,
+so any show with two or more acts is skipped, even one that may be missing a
+second opener), best-connected artists first. One search-grounded request per
 show asks for the headliner, the openers in order, and a quote from each page
 that names an opener, as JSON.
 
@@ -150,7 +151,9 @@ go one at a time, 2 s apart, and the run takes a few hours.
   tests and requests made by hand
 - HTTP 429 ends the run without marking the show; it is asked next run
 - a show is asked once; if nothing is found it is asked again after 90, 180,
-  then 365 days; a show another source filled in meanwhile is skipped
+  then 365 days; a show that no longer qualifies (another source added an
+  act, or `GEMINI_MAX_ACTS` was lowered) is skipped and dropped from the
+  queue, so it comes back if it qualifies again
 - `concertdb gemini` takes its own lock (`ledger.gemini.lock`), so it runs
   alongside `concertdb run`; SQLite (WAL) lets both write, waiting up to a
   minute for the other's transaction

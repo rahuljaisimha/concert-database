@@ -166,3 +166,11 @@ def test_gemini_has_its_own_lock(tmp_path, monkeypatch):
         cli.main(["--db", str(dbp), "gemini"])
     assert (tmp_path / "ledger.gemini.lock").exists()    # not ledger.lock: runs alongside `concertdb run`
     assert not (tmp_path / "ledger.crawl.lock").exists()
+
+
+def test_gemini_max_acts_from_env(monkeypatch):
+    monkeypatch.setenv("GEMINI_MAX_ACTS", "3")
+    assert cli.build_parser().parse_args(["gemini"]).max_acts == 3
+    monkeypatch.delenv("GEMINI_MAX_ACTS")
+    assert cli.build_parser().parse_args(["gemini"]).max_acts == 1
+    assert cli.build_parser().parse_args(["gemini", "--max-acts", "2"]).max_acts == 2

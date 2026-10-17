@@ -62,8 +62,9 @@ concertdb run
 # or the due work runs out. Runs next to `run`; `run` then skips Pollstar.
 concertdb pollstar
 
-# Ask Gemini for openers of past shows that lack one (up to 1,400 a day, the
-# free tier's search quota; can run while `concertdb run` is running)
+# Ask Gemini for openers of past shows with only one act listed (up to 1,400
+# a day, the free tier's search quota; can run while `concertdb run` is
+# running; GEMINI_MAX_ACTS / --max-acts widens it)
 concertdb gemini
 
 concertdb status                      # coverage and progress

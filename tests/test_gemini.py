@@ -122,7 +122,7 @@ def test_not_found_is_asked_again_later(conn):
     assert conn.execute("SELECT COUNT(*) FROM claims WHERE source = 'gemini'").fetchone()[0] == 0
 
 
-def test_only_shows_missing_an_opener_are_queued(conn):
+def test_only_single_act_shows_are_queued(conn):
     single_act_show(conn)
     v = ledger.get_or_create_venue(conn, "Zebulon", "Los Angeles")
     full = ledger.find_or_create_show(conn, "2026-08-01", v)
@@ -132,7 +132,20 @@ def test_only_shows_missing_an_opener_are_queued(conn):
     nobody = ledger.get_or_create_venue(conn, "Elsewhere", "Nowhere")    # no graph artist: not asked
     ledger.add_claim(conn, ledger.find_or_create_show(conn, "2026-01-01", nobody),
                      ledger.get_or_create_artist(conn, "Unknown Band"), "setlistfm", "s9")
+    # Two acts, roles unknown (setlist.fm couldn't tell): skipped by default too.
+    pair = ledger.find_or_create_show(conn, "2026-07-01", v)
+    ledger.add_claim(conn, pair, IDC, "setlistfm", "s2")
+    ledger.add_claim(conn, pair, ledger.get_or_create_artist(conn, "Not In Graph"), "setlistfm", "s3")
     assert gemini.queue_shows(conn) == 1
+    assert gemini.queue_shows(conn, max_acts=2) == 3
+
+
+def test_max_acts_widens_what_is_asked(conn):
+    show = single_act_show(conn)
+    ledger.add_claim(conn, show, ledger.get_or_create_artist(conn, "Other Band"), "setlistfm", "s2")
+    client = FakeClient([CAPTURED])
+    assert gemini.ask(conn, client, **QUIET)["requests"] == 0
+    assert gemini.ask(conn, client, max_acts=2, **QUIET)["found"] == 1
 
 
 def test_skips_a_show_another_source_filled_in(conn):
@@ -142,6 +155,7 @@ def test_skips_a_show_another_source_filled_in(conn):
     client = FakeClient([])
     stats = gemini.ask(conn, client, **QUIET)
     assert stats["skipped"] == 1 and client.prompts == []
+    assert state.get(conn, "gemini", f"show:{show}") is None    # re-queued if it qualifies again
 
 
 def test_429_ends_the_run_and_keeps_the_show_due(conn):

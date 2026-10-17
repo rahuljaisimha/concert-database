@@ -1,7 +1,8 @@
 """Gemini with Google Search grounding: openers for known shows that lack one.
 
-For a show already in the ledger with no opener (one act listed, or acts with
-unknown roles), Gemini searches the web and answers in JSON: headliner,
+For a show already in the ledger with at most MAX_ACTS acts listed (default 1:
+shows with two or more acts are skipped, even when they may be missing a
+second opener; `--max-acts` / GEMINI_MAX_ACTS raises it), Gemini searches the web and answers in JSON: headliner,
 openers in order, and a quote from each page that names an opener. The answer
 is not trusted as is. Gemini can name pages it didn't read and quotes that
 aren't on them (a grounded response may even arrive with no grounding
@@ -42,6 +43,7 @@ MIN_INTERVAL = 2.0
 PAGE_INTERVAL = 1.0
 MAX_PAGES = 3               # evidence pages fetched per answer
 MAX_ERRORS = 5              # errors in a row that end the run
+MAX_ACTS = 1                # only ask about shows with at most this many acts listed
 PROMPT_VERSION = 1
 NOT_FOUND_MIN_DAYS = 90
 NOT_FOUND_MAX_DAYS = 365
@@ -169,15 +171,15 @@ class Client:
 
 # ------------------------------------------------------------- scheduling
 
-def queue_shows(conn: sqlite3.Connection) -> int:
-    """Past shows with a graph artist on the bill and no opener yet; best-connected first."""
+def queue_shows(conn: sqlite3.Connection, max_acts: int = MAX_ACTS) -> int:
+    """Past shows with a graph artist and at most max_acts acts on the bill; best-connected first."""
     rows = conn.execute(
         "SELECT s.id, MAX(a.degree) AS degree FROM shows s"
         " JOIN billings b ON b.show_id = s.id JOIN artists a ON a.id = b.artist_id"
         " WHERE s.date < ? AND s.status NOT IN ('cancelled', 'postponed') AND s.is_festival = 0"
         " AND a.in_graph = 1"
-        " AND s.id NOT IN (SELECT show_id FROM billings WHERE role = 'opener')"
-        " GROUP BY s.id", (date.today().isoformat(),)).fetchall()
+        " AND (SELECT COUNT(*) FROM billings b2 WHERE b2.show_id = s.id) <= ?"
+        " GROUP BY s.id", (date.today().isoformat(), max_acts)).fetchall()
     for r in rows:
         state.ensure(conn, SOURCE, f"show:{r['id']}", priority=r["degree"])
     return len(rows)
@@ -193,14 +195,14 @@ def _show(conn: sqlite3.Connection, show_id: int) -> dict | None:
         "SELECT a.name, b.role FROM billings b JOIN artists a ON a.id = b.artist_id"
         " WHERE b.show_id = ? ORDER BY b.position", (show_id,)).fetchall()
     return {"date": s["date"], "venue": s["venue"], "city": s["city"],
-            "is_festival": bool(s["is_festival"]), "acts": [b["name"] for b in bill],
-            "has_opener": any(b["role"] == "opener" for b in bill)}
+            "is_festival": bool(s["is_festival"]), "acts": [b["name"] for b in bill]}
 
 
-def ask(conn: sqlite3.Connection, client: Client, max_requests: int = DAILY_LIMIT, log=print) -> dict:
+def ask(conn: sqlite3.Connection, client: Client, max_requests: int = DAILY_LIMIT,
+        max_acts: int = MAX_ACTS, log=print) -> dict:
     stats = {"requests": 0, "found": 0, "verified": 0, "not_found": 0, "skipped": 0,
              "errors": 0, "search_queries": 0, "stopped": None}
-    queue_shows(conn)
+    queue_shows(conn, max_acts)
     conn.commit()
 
     def budget_left() -> bool:
@@ -218,7 +220,7 @@ def ask(conn: sqlite3.Connection, client: Client, max_requests: int = DAILY_LIMI
         if not budget_left():
             stats["stopped"] = "daily limit"
             break
-        result = _ask(conn, client, model, row, stats, log)
+        result = _ask(conn, client, model, row, max_acts, stats, log)
         conn.commit()
         if result == "quota":
             stats["stopped"] = "HTTP 429 (quota spent)"
@@ -230,12 +232,14 @@ def ask(conn: sqlite3.Connection, client: Client, max_requests: int = DAILY_LIMI
     return stats
 
 
-def _ask(conn, client, model, row, stats, log) -> str:
+def _ask(conn, client, model, row, max_acts, stats, log) -> str:
     key = row["key"]
     show_id = int(key.split(":", 1)[1])
     show = _show(conn, show_id)
-    if show is None or show["has_opener"] or show["is_festival"]:
-        state.postpone(conn, SOURCE, key, DONE_DAYS)   # another source filled it in
+    if show is None or len(show["acts"]) > max_acts or show["is_festival"]:
+        # Another source filled it in (or max_acts was lowered). Forgotten rather than
+        # postponed, so queue_shows brings it back if it qualifies again.
+        state.forget(conn, SOURCE, key)
         stats["skipped"] += 1
         return "skipped"
 

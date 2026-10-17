@@ -112,6 +112,11 @@ def defer_deep_pass(conn: sqlite3.Connection, source: str, key: str, cursor: dic
     )
 
 
+def forget(conn: sqlite3.Connection, source: str, key: str) -> None:
+    """Drop a unit of work that no longer applies (it is re-registered if it does again)."""
+    conn.execute("DELETE FROM crawl_state WHERE source = ? AND key = ?", (source, key))
+
+
 def mark_failed(conn: sqlite3.Connection, source: str, key: str) -> None:
     """Retry later with exponential backoff: 1h, 2h, 4h ... capped at 7 days."""
     row = get(conn, source, key)
