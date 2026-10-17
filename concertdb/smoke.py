@@ -4,16 +4,20 @@ Never touches the real ledger and makes at most ~10 requests in total, so it is
 safe to run after any change to a source. It reports PASS/FAIL per source.
 """
 
+import json
 import os
 import shutil
 from pathlib import Path
 
-from . import db, seed
+from . import db, ledger, seed, state
 from .http import Fetcher
-from .sources import jsonld, pollstar, setlistfm
+from .normalize import norm
+from .sources import gemini, jsonld, pollstar, setlistfm
 
 TEST_ARTIST = "Flat Worms"
 TEST_VENUE, TEST_CITY = "Zebulon", "Los Angeles"
+# A past show whose opener is known: Gemini should find Flat Worms.
+GEMINI_DATE, GEMINI_HEADLINER = "2026-09-17", "Iguana Death Cult"
 SETLISTFM_REQUESTS = 3
 POLLSTAR_REQUESTS = 3
 
@@ -26,7 +30,7 @@ def run(work_dir: Path, graph: str, page_url: str | None = None, log=print) -> b
         elif p.exists():
             p.unlink()
     conn = db.connect(db_path)
-    results: dict[str, tuple[bool, str]] = {}
+    results: dict[str, tuple[bool | None, str]] = {}   # None = skipped
 
     log(f"seeding from {graph}")
     n = seed.seed_from_graph(conn, graph)
@@ -37,6 +41,10 @@ def run(work_dir: Path, graph: str, page_url: str | None = None, log=print) -> b
     conn.execute(
         "UPDATE crawl_state SET next_due = '2000-01-01' WHERE priority = ?", (seed.USER_PRIORITY,))
     conn.commit()
+
+    # Before setlist.fm, so the show has only the headliner when Gemini is asked.
+    gkey = os.environ.get("GEMINI_API_KEY")
+    results["Gemini"] = _gemini(conn, work_dir, gkey, log) if gkey else (None, "GEMINI_API_KEY not set")
 
     key = os.environ.get("SETLISTFM_API_KEY")
     if key:
@@ -66,8 +74,8 @@ def run(work_dir: Path, graph: str, page_url: str | None = None, log=print) -> b
     log("")
     ok = True
     for name, (passed, detail) in results.items():
-        ok &= passed
-        log(f"{'PASS' if passed else 'FAIL'}  {name:<16} {detail}")
+        ok &= passed is not False
+        log(f"{'SKIP' if passed is None else 'PASS' if passed else 'FAIL'}  {name:<16} {detail}")
     log(f"\nraw responses saved under {work_dir / 'raw'} (useful as test fixtures)")
     conn.close()
     return ok
@@ -75,3 +83,28 @@ def run(work_dir: Path, graph: str, page_url: str | None = None, log=print) -> b
 
 def _count(conn, source: str) -> int:
     return conn.execute("SELECT COUNT(*) FROM claims WHERE source = ?", (source,)).fetchone()[0]
+
+
+def _gemini(conn, work_dir: Path, key: str, log) -> tuple[bool, str]:
+    """One search-grounded request (of the day's free 1,500) for a show with a known opener."""
+    venue = ledger.get_or_create_venue(conn, TEST_VENUE, TEST_CITY)
+    show = ledger.find_or_create_show(conn, GEMINI_DATE, venue)
+    ledger.add_claim(conn, show, ledger.get_or_create_artist(conn, GEMINI_HEADLINER), "manual", "smoke",
+                     role="headliner", confidence=1.0)
+    state.ensure(conn, gemini.SOURCE, f"show:{show}", priority=10**9)
+    client = gemini.Client(Fetcher(work_dir, min_interval=gemini.MIN_INTERVAL),
+                           Fetcher(work_dir, min_interval=gemini.PAGE_INTERVAL),
+                           key, model=os.environ.get("GEMINI_MODEL") or None)
+    try:
+        stats = gemini.ask(conn, client, max_requests=1, log=log)
+    except Exception as e:  # model listing failed, bad key, ...
+        return False, str(e)[:200]
+    row = conn.execute(
+        "SELECT c.extra FROM claims c JOIN artists a ON a.id = c.artist_id"
+        " WHERE c.source = ? AND c.show_id = ? AND a.name_norm = ? AND c.role = 'opener'",
+        (gemini.SOURCE, show, norm(TEST_ARTIST))).fetchone()
+    if row:
+        check = json.loads(row["extra"])["check"]
+        return True, (f"{stats['model']}: {TEST_ARTIST} found (page check: {check}),"
+                      f" {stats['search_queries']} search queries")
+    return False, f"{stats.get('model')}: {TEST_ARTIST} not found {stats}"

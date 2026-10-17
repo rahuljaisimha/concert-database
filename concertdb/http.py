@@ -26,6 +26,7 @@ class Response:
     last_modified: str | None
     content_hash: str | None
     retry_after: float | None = None    # seconds, from a 429/503 Retry-After header
+    url: str | None = None              # final URL, after redirects
 
     @property
     def not_modified(self) -> bool:
@@ -85,9 +86,33 @@ class Fetcher:
             last_modified=r.headers.get("Last-Modified"),
             content_hash=content_hash(text) if r.status_code == 200 else None,
             retry_after=_retry_after(r.headers.get("Retry-After")),
+            url=r.url,
         )
         if r.status_code == 200:
             self.archive(source, r.url, params, text)
+        return resp
+
+    def post_json(
+        self,
+        source: str,
+        url: str,
+        body: dict,
+        headers: dict | None = None,
+        timeout: float = 120,
+    ) -> Response:
+        """POST a JSON body. Successful responses are archived with the request body."""
+        self._pace()
+        r = self.session.post(url, json=body, headers=headers or {}, timeout=timeout)
+        resp = Response(
+            status=r.status_code,
+            text=r.text,
+            etag=None,
+            last_modified=None,
+            content_hash=content_hash(r.text) if r.status_code == 200 else None,
+            retry_after=_retry_after(r.headers.get("Retry-After")),
+        )
+        if r.status_code == 200:
+            self.archive(source, r.url, body, r.text)
         return resp
 
     def archive(self, source: str, url: str, params: dict | None, body: str) -> None:

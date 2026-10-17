@@ -8,7 +8,16 @@ is refetched by accident. When a check finds nothing new the interval doubles
 
 import json
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+
+try:
+    from zoneinfo import ZoneInfo
+    PACIFIC = ZoneInfo("America/Los_Angeles")
+except Exception:  # no tz database: UTC-8 starts the day at or after the real reset
+    PACIFIC = timezone(timedelta(hours=-8))
+
+# Sources whose daily quota resets at midnight Pacific rather than UTC.
+PACIFIC_DAY_SOURCES = {"gemini"}
 
 
 def _now() -> datetime:
@@ -116,8 +125,14 @@ def mark_failed(conn: sqlite3.Connection, source: str, key: str) -> None:
 
 # ------------------------------------------------------------------ usage
 
+def usage_day(source: str, now: datetime | None = None) -> date:
+    """The day a source's daily quota counts against."""
+    now = now or _now()
+    return now.astimezone(PACIFIC).date() if source in PACIFIC_DAY_SOURCES else now.date()
+
+
 def record_usage(conn: sqlite3.Connection, source: str, requests: int = 1, usd: float = 0.0) -> None:
-    day = _now().date().isoformat()
+    day = usage_day(source).isoformat()
     conn.execute(
         "INSERT INTO usage (day, source, requests, usd) VALUES (?, ?, ?, ?)"
         " ON CONFLICT (day, source) DO UPDATE SET"
@@ -129,7 +144,7 @@ def record_usage(conn: sqlite3.Connection, source: str, requests: int = 1, usd: 
 def requests_today(conn: sqlite3.Connection, source: str) -> int:
     row = conn.execute(
         "SELECT requests FROM usage WHERE day = ? AND source = ?",
-        (_now().date().isoformat(), source),
+        (usage_day(source).isoformat(), source),
     ).fetchone()
     return row["requests"] if row else 0
 

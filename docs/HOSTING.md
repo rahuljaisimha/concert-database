@@ -7,7 +7,9 @@
   after a rate-limit response).
 - **Memory:** well under 1 GB.
 - **Disk:** a few GB over the first year (database + compressed raw archive).
-- **Uptime:** it has to run *once a day*, not continuously.
+- **Uptime:** it has to run *once a day*, not continuously. The optional
+  Gemini step (`concertdb gemini`) runs for a few more hours a day, alongside
+  the crawl.
 
 ## What happens if the machine is off
 
@@ -86,6 +88,10 @@ Windows Task Scheduler.
    (`deploy/run-pollstar.sh`, Pollstar at ~1 request/s for several hours, log
    in `data/pollstar.log`). They run side by side; see "Concurrency" in
    docs/ARCHITECTURE.md.
+   A third task, `concert-database-gemini`, starts at 1 am (`deploy/gemini.sh`,
+   log in `data/gemini.log`; it exits quickly when `GEMINI_API_KEY` isn't set).
+   The Gemini step's budget follows the Pacific day whatever the PC's time
+   zone, so the 1 am start only matters for using a fresh quota early.
 5. Power options: let the PC sleep if you like, but enable wake timers (or set
    it never to sleep); the task wakes it.
 

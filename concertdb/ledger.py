@@ -19,6 +19,7 @@ SOURCE_WEIGHTS = {
     "setlistfm": 0.8,
     "wayback": 0.8,
     "llm": 0.6,
+    "gemini": 0.6,
 }
 DEFAULT_WEIGHT = 0.5
 

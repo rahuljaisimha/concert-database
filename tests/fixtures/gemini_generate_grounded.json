@@ -1,0 +1,24 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {"text": "Searching for the bill.", "thought": true},
+          {"text": "{\"headliner\": \"Iguana Death Cult\", \"openers\": [\"Flat Worms\", \"Made Up Band\"], \"confident\": true, \"evidence\": [{\"url\": \"https://example.com/zebulon/iguana-death-cult\", \"quote\": \"Iguana Death Cult with Flat Worms\"}]}"}
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "groundingMetadata": {
+        "webSearchQueries": ["Iguana Death Cult Zebulon September 17 2026", "Iguana Death Cult Zebulon support"],
+        "groundingChunks": [
+          {"web": {"uri": "https://example.com/zebulon/iguana-death-cult", "title": "example.com"}},
+          {"web": {"uri": "https://example.com/listings/week", "title": "example.com"}}
+        ]
+      }
+    }
+  ],
+  "usageMetadata": {"promptTokenCount": 120, "candidatesTokenCount": 60, "totalTokenCount": 900},
+  "modelVersion": "gemini-3.8-flash"
+}
