@@ -84,9 +84,9 @@ source, and claims keep their own event date. So it is kept short:
 - **Pollstar event lists** are archived only when they changed; an unchanged
   recheck stores nothing. Venue lookups (autocomplete) are always archived;
   `pollstar-rematch` uses them.
-- **Gemini evidence pages are not archived.** The claim keeps a snippet of
-  the page text around the matched name (`extra.snippet`). Gemini's own
-  answers are archived (`data/raw/gemini/`).
+- **Pages fetched for Gemini are not archived.** A `specific` claim keeps its
+  quote (`extra.quote`). Search results and Gemini's answers are archived
+  (`data/raw/firecrawl/`, `data/raw/gemini/`).
 
 ## Rate limits
 
@@ -164,46 +164,72 @@ about, on a schedule, with tight limits:
 
 ## Gemini (`concertdb/sources/gemini.py`)
 
-Fills in openers for shows already in the ledger: past shows with an act from
-the MusicSceneMap graph and at most `GEMINI_MAX_ACTS` acts listed (default 1,
-so any show with two or more acts is skipped, even one that may be missing a
-second opener), best-connected artists first. One search-grounded request per
-show asks for the headliner, the openers in order, and a quote from each page
-that names an opener, as JSON.
+Fills in openers for shows already in the ledger: past, non-festival shows with
+an act from the MusicSceneMap graph and at most `GEMINI_MAX_ACTS` acts listed
+(default 1). Shows by artists you prioritized (`concertdb prioritize`) come
+first, then the most recent shows (pages about them are easiest to find).
 
-The answer isn't trusted as given. A grounded response can cite pages the model
-didn't read, misquote them, or come back with no grounding metadata at all, so
-up to 3 cited pages are fetched (the model's evidence URLs first, then the
-grounding sources; Google's redirect links resolve to the real page, whose URL
-is stored on the claim) and each act's name is looked for on them:
+Gemini's own Google Search grounding isn't on the free tier for current models,
+so the search is done here, with Firecrawl's search API, and Gemini (default
+`gemini-3.5-flash-lite`, no tools) only reads text we fetched. Work goes a tour
+at a time:
+
+1. The most urgent due show, plus the same artist's other due shows that chain
+   to it with gaps of at most 14 days (up to 12 shows), is one tour.
+2. Two searches: the tour (`Ty Segall Australia 2026 tour support`) and its
+   venues (`Ty Segall "Mo's Desert Clubhouse" "Princess Theatre" ... 2026`;
+   this finds the promoter's tour page without knowing the promoter). A one-show
+   tour gets one show search instead.
+3. The result pages are fetched once; only the text around each show's venue,
+   city and date goes into ONE Gemini call for the whole tour, which answers per
+   show: headliner, openers, and a quote naming THIS show with its openers.
+4. A show is done only when that quote is on a fetched page (or a search
+   result), names the show (venue, city or date) and contains every opener. A
+   support act announced "on all dates" isn't proof for each date, so a show
+   that isn't done gets its own search and Gemini call (at most 4 per tour).
+5. Shows by the same artist that the pages list but the ledger lacks
+   (`other_shows`) are added when their quote is on a fetched page and names
+   the venue and the date, within the tour's dates ± 14 days, and the artist
+   has no show that date (or a day off in the same city). Claim key
+   `found:<artist>:<date>`, `extra.check` = `discovered`.
 
 | Check | Confidence | × weight 0.6 | Exported at the default 0.4? |
 |---|---|---|---|
-| name found on a fetched page | 0.8 | 0.48 | yes |
-| no page could be fetched | 0.5 | 0.30 | only with another source |
-| pages fetched, name on none | 0.2 | 0.12 | no |
+| act in a show-specific quote found on a page (`specific`) | 0.8 | 0.48 | yes |
+| act named on a fetched page that names the show (`page`) | 0.5 | 0.30 | only with another source |
+| act on no fetched page | not stored | | |
 
-The model saying `confident: false` multiplies these by 0.6. Each claim's
-`extra` records the model, the prompt version, the check, whether the quote
-itself was on a page, and how many searches the request made.
+Each claim's `extra` records the model, the prompt version, the check and, for
+`specific`, the quote. A show with only `page` evidence (or none) is asked again
+after 90, 180, then 365 days; a done show isn't asked again.
 
-Free tier limits (per project): 1,500 search-grounded requests a day, reset at
-midnight Pacific; per-minute limits are far above what this uses, so requests
-go one at a time, 2 s apart, and the run takes a few hours.
+In a trial on Ty Segall's Australian shows (Feb–Mar 2026, 5 shows) the tour
+and venue searches (4 credits), 18 page fetches and one Gemini call (~9,000
+tokens) found every opener, each with a show-specific quote, plus two dates the
+ledger didn't have.
 
-- at most 1,400 requests per Pacific day (`usage`), leaving room for smoke
-  tests and requests made by hand
-- HTTP 429 ends the run without marking the show; it is asked next run
-- a show is asked once; if nothing is found it is asked again after 90, 180,
-  then 365 days; a show that no longer qualifies (another source added an
-  act, or `GEMINI_MAX_ACTS` was lowered) is skipped and dropped from the
-  queue, so it comes back if it qualifies again
+Budgets: a run spends whatever the providers allow, as fast as their
+per-minute limits allow; each request is counted (and committed) before it is
+sent.
+
+- Firecrawl (`usage` source `firecrawl`, in credits; a 10-result search costs
+  2; the free plan has 1,000 a month): searches 6.5 s apart (free plan: 10 a
+  minute). HTTP 402 (out of credits) ends the run. Optional caps:
+  `FIRECRAWL_MONTHLY_CREDITS` a calendar month, `--max-credits` a run.
+- Gemini (`usage` source `gemini`, Pacific day): free tier for
+  `gemini-3.5-flash-lite` is 15 requests/min, 500/day, 250k tokens/min; calls
+  go 4.5 s apart, at most 500 a day (`--max-requests` a run), prompts ≤ ~15k
+  tokens. A 429 for the day's quota ends the run. (`gemini-3.8-flash` is
+  1/min and 20/day on the free tier: too few for this.) 1,000 Firecrawl
+  credits need ~300–350 Gemini calls, so a month's credits fit in one day.
+- A per-minute 429 from either waits (`Retry-After` / `retryDelay`, else 60 s)
+  and retries, 3 times at most; then the run ends. The shows stay due.
+- 1,000 credits take ~2–3 hours (searches, page fetches and Gemini calls).
 - `concertdb gemini` is its own process with its own lock
-  (`ledger.gemini.lock`), next to `run` and `pollstar`; it commits before each
-  Gemini request and page fetch and holds the write lock only while storing
-  (see "Concurrency")
-- Gemini's answers are archived (`data/raw/gemini/`); fetched evidence pages
-  are not, and the claim keeps a snippet around the matched name instead
+  (`ledger.gemini.lock`), next to `run` and `pollstar`; it commits before every
+  request and holds the write lock only while storing (see "Concurrency").
+- Search results (`data/raw/firecrawl/`) and Gemini answers
+  (`data/raw/gemini/`) are archived; fetched pages are not.
 
 ## Roadmap
 
@@ -219,12 +245,11 @@ go one at a time, 2 s apart, and the run takes a few hours.
 3. **Gap detection**: single-act shows, tour-routing gaps (a band in Phoenix
    on the 15th and Seattle on the 22nd probably played LA in between), and
    capture–recapture estimates of missing shows per artist.
-4. **More from the Gemini step**: one request per tour leg instead of per
-   show (a tour announcement often names the support for every date), which
-   would stretch the daily search quota further; and a second model (e.g.
-   Claude via the Batch API) to read the fetched pages and confirm roles,
-   cached by (page hash, prompt version), with a hard monthly $ cap from
-   `usage`.
+4. **More from the Gemini step**: a second search provider next to Firecrawl
+   (1,000 credits a month is ~15 tours a day at best); fairness across artists
+   (a cap on tours per artist per run); Pollstar's `promoters` field as a search
+   term; a second model to confirm roles on the fetched pages, cached by
+   (page hash, prompt version), with a hard monthly $ cap from `usage`.
 5. **Bandsintown** past events, if an `app_id` is granted.
 6. **MusicSceneMap import**: load `opened_for.csv` into the graph build. The
    ledger's saved Pollstar events could also serve MusicSceneMap's concert

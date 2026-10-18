@@ -17,7 +17,7 @@ came from:
 | Pollstar | Upcoming shows with headliner/support flags, saved before they disappear (past dates aren't public) | ✅ `concertdb pollstar-add` / `pollstar` |
 | Concert Archives (concertarchives.org) | Fan-logged past shows with full lineups, often older and smaller shows | planned (checking terms first) |
 | Wayback Machine | Archived venue calendars for past years | planned |
-| Gemini + Google Search | Fills specific gaps (a known show with no opener listed); answers are checked against the pages they cite | ✅ `concertdb gemini` |
+| Web search + Gemini | Fills specific gaps (a known show with no opener listed), a tour at a time: Firecrawl search finds pages, Gemini reads them, answers are checked against the pages; also adds tour dates the ledger lacks | ✅ `concertdb gemini` |
 | Bandsintown | Past events with lineups (needs an `app_id`) | planned |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works and
@@ -62,8 +62,9 @@ concertdb run
 # or the due work runs out. Runs next to `run`; `run` then skips Pollstar.
 concertdb pollstar
 
-# Ask Gemini for openers of past shows with only one act listed (up to 1,400
-# a day, the free tier's search quota; can run while `concertdb run` is
+# Find openers of past shows with only one act listed: Firecrawl search +
+# Gemini, a tour at a time (needs GEMINI_API_KEY and FIRECRAWL_API_KEY; spends
+# the Firecrawl credits left and stops at a quota; can run while `concertdb run` is
 # running; GEMINI_MAX_ACTS / --max-acts widens it)
 concertdb gemini
 
@@ -100,7 +101,7 @@ crawl continues where it stopped.
 
 `pytest` uses fixtures in `tests/fixtures/` (see its README). `smoke-test`
 makes a few real requests per source (setlist.fm for Flat Worms, Pollstar for
-Zebulon, one search-grounded Gemini request for the Iguana Death Cult show at
+Zebulon, one Firecrawl search and one Gemini call for the Iguana Death Cult show at
 Zebulon, optionally one page with `--page-url`) into a throwaway database
 under `data/smoke/`, prints PASS/FAIL per source, and never touches the real
 ledger or its daily budgets. Its saved responses in `data/smoke/raw/` make

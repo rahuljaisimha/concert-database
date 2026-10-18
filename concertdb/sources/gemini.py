@@ -1,111 +1,246 @@
-"""Gemini with Google Search grounding: openers for known shows that lack one.
+"""Openers for known shows that lack one: web search, fetched pages, Gemini reads them.
 
-For a show already in the ledger with at most MAX_ACTS acts listed (default 1:
-shows with two or more acts are skipped, even when they may be missing a
-second opener; `--max-acts` / GEMINI_MAX_ACTS raises it), Gemini searches the web and answers in JSON: headliner,
-openers in order, and a quote from each page that names an opener. The answer
-is not trusted as is. Gemini can name pages it didn't read and quotes that
-aren't on them (a grounded response may even arrive with no grounding
-metadata), so the cited pages are fetched and each act's name is looked for
-on them:
+Gemini's own Google Search grounding isn't on the free tier for current
+models, so the searching is done here, with Firecrawl's search API, and Gemini
+(no tools) only reads text we fetched ourselves. Work goes by tour, not show:
 
-  name found on a fetched page        CONF_VERIFIED
-  pages fetched, name on none         CONF_ABSENT   (likely made up)
-  no page could be fetched            CONF_UNCHECKED
+  1. Take the most urgent due show, and the same artist's other due shows that
+     chain to it with gaps of at most TOUR_GAP_DAYS (up to TOUR_MAX_SHOWS).
+  2. Search for the tour ("<artist> <countries> <year> tour support") and for
+     its venues ("<artist> "<venue 1>" "<venue 2>" ... <year>": this finds the
+     promoter's tour page without knowing the promoter). A one-show "tour" gets
+     one show search instead.
+  3. Fetch the result pages; cut out the text around each show's venue, city
+     and date; ONE Gemini call reads it and answers, per show: headliner,
+     openers, and a quote that names THIS show together with its openers.
+  4. A show is done only when that quote is really on a fetched page, names the
+     show (venue, city or date) and contains every opener. A support act
+     announced for "all dates" isn't proof for every date, so a show that isn't
+     done gets its own search and Gemini call (at most MAX_FALLBACKS per tour).
+  5. Shows of the same artist that the pages list but the ledger lacks
+     (`other_shows`) are added when their quote is on a fetched page and names
+     the venue and the date, inside the tour's dates +- DISCOVER_DAYS.
 
-Request discipline (free tier: 1,500 search-grounded requests a day, reset at
-midnight Pacific; the other free limits are far above what this uses):
-  - at most DAILY_LIMIT grounded requests per Pacific day, counted in `usage`
-  - one request at a time, MIN_INTERVAL apart
-  - HTTP 429 ends the run (the quota is spent); the show stays due
-  - a show is asked once; when nothing is found it is asked again after
-    90, 180, then 365 days (pages about a show can appear later)
+Claims (source "gemini", weight 0.6):
+  act in a show-specific quote found on a page   CONF_SPECIFIC  check "specific"
+  act named on a fetched page that names the show CONF_PAGE     check "page"
+  act on no fetched page                          not stored (logged)
 
-Unit of work: gemini / show:<our show id>
+Budgets: spend what the providers allow, as fast as their per-minute limits
+allow. Every request is counted (and committed) before it is sent, so a crash
+can't hide spent quota.
+  - Firecrawl (usage source "firecrawl", in credits; a 10-result search costs
+    2): searches SEARCH_INTERVAL apart (free plan: 10 a minute). HTTP 402 (out
+    of credits) ends the run. Optional cap: FIRECRAWL_MONTHLY_CREDITS a
+    calendar month, --max-credits a run.
+  - Gemini (usage source "gemini", Pacific day): calls MIN_INTERVAL apart, at
+    most DAILY_LIMIT a day. A 429 for the day's quota ends the run.
+  - A per-minute 429 (either provider) waits (Retry-After / retryDelay, else
+    60 s) and retries, up to RETRIES_429 times; then the run ends. The shows
+    stay due.
+
+Unit of work: gemini / show:<our show id>. Done: asked again in 10 years.
+Nothing show-specific found: asked again after 90, 180, then 365 days.
 """
 
+import calendar
+import html as htmllib
 import json
+import math
 import re
 import sqlite3
-from datetime import date
+import time
+from datetime import date, datetime, timedelta, timezone
 
 import requests
 
 from .. import db, ledger, state
 from ..http import Fetcher
 from ..normalize import norm
+from . import setlistfm
 
 SOURCE = "gemini"
-PAGES = "gemini-pages"      # source name for evidence-page fetches (not archived: see Client.page)
-SNIPPET_CHARS = 160         # page text kept on each side of a matched name, in the claim
+SEARCH = "firecrawl"        # usage source for search credits; search responses are archived here
+PAGES = "gemini-pages"      # source name for page fetches (not archived)
 API = "https://generativelanguage.googleapis.com/v1beta"
-DAILY_LIMIT = 1400          # of the free tier's 1,500; leaves room for smoke tests and hand runs
-MIN_INTERVAL = 2.0
+SEARCH_API = "https://api.firecrawl.dev/v2/search"
+MODEL = "gemini-3.5-flash-lite"
+# Free tier, gemini-3.5-flash-lite: 15 requests/min, 500/day, 250k tokens/min. (gemini-3.8-flash
+# is 1/min and 20/day: too few for this.) A prompt is at most ~15k tokens (MAX_PROMPT_CHARS).
+DAILY_LIMIT = 500           # Gemini calls per Pacific day
+MONTHLY_CREDITS = None      # optional Firecrawl cap per calendar month (FIRECRAWL_MONTHLY_CREDITS)
+SEARCH_RESULTS = 10
+SEARCH_CREDITS = 2          # what a 10-result search costs; the response says what it really cost
+MIN_INTERVAL = 4.5          # between Gemini calls: under 15 a minute (and 250k tokens a minute)
+SEARCH_INTERVAL = 6.5       # between searches: under Firecrawl's free 10 a minute
+RETRIES_429 = 3             # per-minute pushback: waits before the run gives up
+MAX_WAIT_429 = 300          # a longer Retry-After than this ends the run instead
 PAGE_INTERVAL = 1.0
-MAX_PAGES = 3               # evidence pages fetched per answer
 MAX_ERRORS = 5              # errors in a row that end the run
 MAX_ACTS = 1                # only ask about shows with at most this many acts listed
-PROMPT_VERSION = 1
+TOUR_GAP_DAYS = 14
+TOUR_MAX_SHOWS = 12
+MAX_PAGES = 12              # pages fetched per search round
+MAX_FALLBACKS = 4           # per-show searches per tour
+VENUE_QUERY_MAX = 4         # venue names in the venue query
+EXCERPT_WIDTH = 350         # page text kept on each side of a venue/city/date mention
+MAX_PAGE_CHARS = 6000       # excerpt text per page in a prompt
+MAX_PROMPT_CHARS = 60000
+DISCOVER_DAYS = 14
+PROMPT_VERSION = 2
 NOT_FOUND_MIN_DAYS = 90
 NOT_FOUND_MAX_DAYS = 365
 DONE_DAYS = 10 * 365
-CONF_VERIFIED = 0.8
-CONF_UNCHECKED = 0.5
-CONF_ABSENT = 0.2
-UNSURE_FACTOR = 0.6         # the model itself said confident: false
-SKIP_MODEL_WORDS = ("lite", "image", "tts", "audio", "live", "preview", "exp")
+CONF_SPECIFIC = 0.8
+CONF_PAGE = 0.5
+PRIORITIZED = 10**6         # added to the queue priority of shows by artists you prioritized
+
+MONTHS = [m.lower() for m in calendar.month_name[1:]]
 
 
-# ---------------------------------------------------------------- parsing
+# ---------------------------------------------------------------- text
 
-def pick_model(models: list[dict]) -> str | None:
-    """Newest stable 'gemini-X.Y-flash' that supports generateContent."""
-    best, best_version = None, ()
-    for m in models:
-        name = (m.get("name") or "").removeprefix("models/")
-        if "generateContent" not in (m.get("supportedGenerationMethods") or []):
+def page_text(raw: str) -> str:
+    """Visible page text, whitespace collapsed."""
+    t = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", raw or "")
+    t = htmllib.unescape(re.sub(r"<[^>]+>", " ", t))
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _padded(s: str) -> str:
+    return f" {norm(s)} "
+
+
+def mentions(words: str, phrase: str) -> bool:
+    """words: _padded() text."""
+    n = norm(phrase)
+    return bool(n) and f" {n} " in words
+
+
+def date_forms(day: str, numeric: bool = False) -> list[str]:
+    """Ways a page writes a date: 'march 2', '2 mar', ... (+ '2/3', '3/2' if numeric)."""
+    d = date.fromisoformat(day)
+    mon, n = MONTHS[d.month - 1], str(d.day)
+    forms = [f"{mon} {n}", f"{n} {mon}", f"{mon[:3]} {n}", f"{n} {mon[:3]}",
+             f"{mon} {n}th", f"{n}th {mon}", f"{mon} {n}st", f"{n}st {mon}",
+             f"{mon} {n}nd", f"{n}nd {mon}", f"{mon} {n}rd", f"{n}rd {mon}"]
+    if numeric:
+        forms += [f"{n}/{d.month}", f"{d.month}/{n}", f"{d.day:02d}.{d.month:02d}", f"{d.month:02d}.{d.day:02d}"]
+    return forms
+
+
+def venue_core(venue: str) -> str:
+    return norm(venue)          # norm() already drops a leading "The"
+
+
+def show_keys(show: dict, numeric: bool = False, city: bool = True) -> list[str]:
+    """Normalized phrases that point at this show on a page."""
+    keys = [venue_core(show["venue"])] + [norm(f) for f in date_forms(show["date"], numeric)]
+    if city and show.get("city"):
+        keys.append(norm(show["city"]))
+    return [k for k in dict.fromkeys(keys) if k]
+
+
+def raw_keys(show: dict) -> list[str]:
+    """Lowercase phrases searched for in raw page text, to cut excerpts."""
+    keys = [show["venue"].lower().replace("’", "'"), venue_core(show["venue"])]
+    if show.get("city"):
+        keys.append(show["city"].lower())
+    keys += date_forms(show["date"], numeric=True)
+    return [k for k in dict.fromkeys(keys) if k]
+
+
+def excerpts(text: str, shows: list[dict], width: int = EXCERPT_WIDTH, limit: int = MAX_PAGE_CHARS) -> str:
+    """The parts of a page around any of the shows' venue, city or date, merged."""
+    low = text.lower().replace("’", "'")
+    hits = sorted({m.start() for s in shows for k in raw_keys(s)
+                   for m in re.finditer(r"(?<!\w)" + re.escape(k) + r"(?!\w)", low)})
+    windows = []
+    for h in hits:
+        if windows and h - width <= windows[-1][1]:
+            windows[-1][1] = h + width
+        else:
+            windows.append([max(0, h - width), h + width])
+    out, total = [], 0
+    for a, b in windows:
+        piece = text[a:b]
+        if total + len(piece) > limit:
+            piece = piece[: max(0, limit - total)]
+        if piece:
+            out.append(piece)
+            total += len(piece)
+        if total >= limit:
+            break
+    return " ... ".join(out)
+
+
+def names_show(words: str, show: dict) -> bool:
+    """Does a page (_padded text) name this show's venue or date (a city alone isn't enough)?"""
+    return any(f" {k} " in words for k in show_keys(show, city=False))
+
+
+# ---------------------------------------------------------------- prompt / answer
+
+ANSWER_SHAPE = (
+    '{"shows": [{"date": "YYYY-MM-DD", "headliner": str|null, "openers": [str], '
+    '"show_specific_quote": str|null, "url": str|null}], '
+    '"other_shows": [{"date": "YYYY-MM-DD", "venue": str, "city": str|null, "country": str|null, '
+    '"headliner": str|null, "openers": [str], "quote": str, "url": str}]}'
+)
+
+
+def build_prompt(artist: str, shows: list[dict], pages: list[dict], snippets: list[dict]) -> str:
+    lines = [
+        f"{artist} played the shows listed below. Using ONLY the text below (not what you know), "
+        "give for EACH listed show its headliner and its supporting (opening) acts in billing order.",
+        "Reply with only JSON: " + ANSWER_SHAPE,
+        "show_specific_quote: copied exactly from the text, a passage that names THIS show (its venue, "
+        "city or date) together with its support acts; null if the acts are only given for the tour in "
+        "general. url: the page it is from.",
+        f"other_shows: shows by {artist} that the text lists but that are NOT in the list below, each "
+        "with a quote copied exactly from the text that names its date and venue (the venue's own name, "
+        "not just the city; leave out shows whose venue isn't given). Leave it empty if none.",
+        "Don't guess: an empty openers list is fine. Don't include the headliner among the openers.",
+        "", "SHOWS:",
+    ]
+    for s in shows:
+        d = date.fromisoformat(s["date"])
+        place = ", ".join(x for x in (s["venue"], s.get("city"), s.get("country")) if x)
+        lines.append(f"- {s['date']} ({d:%A}): {place}")
+    lines += ["", "PAGE TEXT:"]
+    budget = MAX_PROMPT_CHARS
+    for p in pages:
+        if not p["excerpt"] or budget <= 0:
             continue
-        if any(w in name for w in SKIP_MODEL_WORDS):
-            continue
-        v = re.fullmatch(r"gemini-(\d+(?:\.\d+)*)-flash", name)
-        if v:
-            version = tuple(int(x) for x in v.group(1).split("."))
-            if version > best_version:
-                best, best_version = name, version
-    return best
-
-
-def build_prompt(show: dict) -> str:
-    d = date.fromisoformat(show["date"])
-    place = show["venue"] + (f" in {show['city']}" if show["city"] else "")
-    acts = " and ".join(show["acts"])
-    return (
-        f"A concert at {place} on {d:%B} {d.day}, {d.year} featured {acts}. "
-        "Who headlined, and who were the supporting (opening) acts, in billing order? "
-        "Use web search. Reply with only JSON: "
-        '{"headliner": str, "openers": [str, in order], "confident": bool, '
-        '"evidence": [{"url": str, "quote": str}]}. '
-        "Quote the exact text from each page that names the opener. "
-        "If you can't find it, return an empty openers list rather than guessing."
-    )
+        block = f"[{p['url']}]\n{p['excerpt'][:budget]}\n"
+        budget -= len(block)
+        lines.append(block)
+    if snippets:
+        lines += ["SEARCH RESULTS:"] + [f"[{x['url']}] {x['title']} — {x['description']}" for x in snippets]
+    return "\n".join(lines)
 
 
 def read_response(raw: dict) -> dict:
-    """Answer text and grounding metadata from a generateContent response."""
+    """Answer text (thoughts dropped) and token count from a generateContent response."""
     cand = (raw.get("candidates") or [{}])[0]
     parts = (cand.get("content") or {}).get("parts") or []
-    gm = cand.get("groundingMetadata") or {}
     return {
         "text": "".join(p.get("text", "") for p in parts if not p.get("thought")),
         "finish": cand.get("finishReason"),
-        "queries": gm.get("webSearchQueries") or [],
-        "sources": [c["web"]["uri"] for c in gm.get("groundingChunks") or []
-                    if (c.get("web") or {}).get("uri")],
+        "tokens": (raw.get("usageMetadata") or {}).get("totalTokenCount") or 0,
     }
 
 
+def _str(v) -> str | None:
+    return v.strip() if isinstance(v, str) and v.strip() else None
+
+
+def _names(v) -> list[str]:
+    return [o.strip() for o in v if isinstance(o, str) and o.strip()] if isinstance(v, list) else []
+
+
 def parse_answer(text: str) -> dict | None:
-    """The JSON answer (fenced or bare), or None if it isn't there or has the wrong shape."""
+    """{"shows": {date: {...}}, "other_shows": [...]}, or None if the JSON isn't there."""
     m = re.search(r"\{.*\}", text or "", re.S)
     if not m:
         return None
@@ -113,233 +248,535 @@ def parse_answer(text: str) -> dict | None:
         obj = json.loads(m.group(0))
     except json.JSONDecodeError:
         return None
-    if not isinstance(obj, dict):
+    if not isinstance(obj, dict) or not isinstance(obj.get("shows") or [], list):
         return None
-    headliner = obj.get("headliner")
-    openers = obj.get("openers") or []
-    evidence = obj.get("evidence") or []
-    if not isinstance(openers, list) or not isinstance(evidence, list):
+    shows = {}
+    for s in obj.get("shows") or []:
+        if isinstance(s, dict) and _str(s.get("date")):
+            shows[s["date"].strip()] = {
+                "headliner": _str(s.get("headliner")), "openers": _names(s.get("openers")),
+                "quote": _str(s.get("show_specific_quote")), "url": _str(s.get("url"))}
+    others = []
+    for s in obj.get("other_shows") or [] if isinstance(obj.get("other_shows"), list) else []:
+        if isinstance(s, dict) and _str(s.get("date")) and _str(s.get("venue")) and _str(s.get("quote")):
+            others.append({
+                "date": s["date"].strip(), "venue": s["venue"].strip(), "city": _str(s.get("city")),
+                "country": _str(s.get("country")), "headliner": _str(s.get("headliner")),
+                "openers": _names(s.get("openers")), "quote": s["quote"].strip(), "url": _str(s.get("url"))})
+    return {"shows": shows, "other_shows": others}
+
+
+def quote_source(quote: str | None, texts: list[dict]) -> dict | None:
+    """The text (page or search result) that really contains the quote. The quote
+    may skip text with '...'; every part must then be in the same text, in order."""
+    parts = [norm(p) for p in re.split(r"\.\.\.|…", quote or "")]
+    parts = [p for p in parts if p]
+    if not parts:
         return None
-    return {
-        "headliner": headliner.strip() if isinstance(headliner, str) and headliner.strip() else None,
-        "openers": [o.strip() for o in openers if isinstance(o, str) and o.strip()],
-        "confident": obj.get("confident") is True,
-        "evidence": [{"url": e.get("url") or "", "quote": e.get("quote") or ""}
-                     for e in evidence if isinstance(e, dict)],
-    }
-
-
-def page_words(html: str) -> str:
-    """Normalized page text (tags dropped, script contents kept: JSON-LD names acts too)."""
-    return f" {norm(re.sub(r'<[^>]+>', ' ', html))} "
-
-
-def mentions(words: str, phrase: str) -> bool:
-    n = norm(phrase)
-    return bool(n) and f" {n} " in words
+    for t in texts:
+        pos = 0
+        for p in parts:
+            i = t["words"].find(f" {p} ", pos)
+            if i < 0:
+                break
+            pos = i + len(p) + 1
+        else:
+            return t
+    return None
 
 
 # ---------------------------------------------------------------- client
 
 class Client:
-    def __init__(self, fetcher: Fetcher, page_fetcher: Fetcher, key: str, model: str | None = None):
+    def __init__(self, fetcher: Fetcher, search_fetcher: Fetcher, page_fetcher: Fetcher,
+                 key: str, search_key: str, model: str | None = None):
         self.fetcher = fetcher
+        self.search_fetcher = search_fetcher
         self.page_fetcher = page_fetcher
-        self.headers = {"x-goog-api-key": key}   # a header, so the key never lands in the archive
-        self.model = model
-
-    def list_models(self) -> list[dict]:
-        models, token = [], None
-        while True:
-            params = {"pageSize": "1000", **({"pageToken": token} if token else {})}
-            resp = self.fetcher.get(SOURCE, f"{API}/models", params=params, headers=self.headers)
-            if resp.status != 200:
-                raise RuntimeError(f"listing Gemini models: HTTP {resp.status} {resp.text[:300]}")
-            page = resp.json()
-            models += page.get("models") or []
-            token = page.get("nextPageToken")
-            if not token:
-                return models
+        self.headers = {"x-goog-api-key": key}      # headers, so keys never land in the archive
+        self.search_headers = {"Authorization": f"Bearer {search_key}"}
+        self.model = model or MODEL
 
     def generate(self, model: str, prompt: str):
-        body = {"contents": [{"parts": [{"text": prompt}]}], "tools": [{"google_search": {}}]}
+        body = {"contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"responseMimeType": "application/json", "temperature": 0}}
         return self.fetcher.post_json(SOURCE, f"{API}/models/{model}:generateContent", body,
                                       headers=self.headers)
 
+    def search(self, query: str):
+        return self.search_fetcher.post_json(SEARCH, SEARCH_API, {"query": query, "limit": SEARCH_RESULTS},
+                                             headers=self.search_headers, timeout=60)
+
     def page(self, url: str):
-        # Whole pages would be most of the archive (~100+ KB each); the claim keeps
-        # a snippet around the matched name instead.
+        # Whole pages would be most of the archive; claims keep the quote instead.
         return self.page_fetcher.get(PAGES, url, keep_raw=False)
+
+
+def search_results(raw: dict) -> list[dict]:
+    data = raw.get("data")
+    web = data.get("web") if isinstance(data, dict) else data
+    return [{"url": x["url"], "title": x.get("title") or "", "description": x.get("description") or ""}
+            for x in web or [] if isinstance(x, dict) and x.get("url")]
+
+
+# ------------------------------------------------------------- budgets
+
+def credits_this_month(conn: sqlite3.Connection, today: date | None = None) -> int:
+    today = today or datetime.now(timezone.utc).date()
+    row = conn.execute("SELECT COALESCE(SUM(requests), 0) AS n FROM usage WHERE source = ? AND day LIKE ?",
+                       (SEARCH, f"{today:%Y-%m}-%")).fetchone()
+    return row["n"]
+
+
+def retry_wait(resp) -> float:
+    """Seconds to wait after a 429: Retry-After, Gemini's retryDelay, else 60."""
+    if resp.retry_after:
+        return resp.retry_after
+    m = re.search(r'"retryDelay":\s*"(\d+(?:\.\d+)?)s"', resp.text or "")
+    return float(m.group(1)) + 1 if m else 60.0
+
+
+def daily_quota_spent(resp) -> bool:
+    """A Gemini 429 for the day's quota (not the minute's)."""
+    return "PerDay" in (resp.text or "")
 
 
 # ------------------------------------------------------------- scheduling
 
 def queue_shows(conn: sqlite3.Connection, max_acts: int = MAX_ACTS) -> int:
-    """Past shows with a graph artist and at most max_acts acts on the bill; best-connected first."""
+    """Past non-festival shows with a graph artist and at most max_acts acts.
+
+    Shows by artists you prioritized come first, then the most recent: pages
+    about recent shows are the easiest to find (and well-connected artists with
+    long histories, like Pigface, no longer crowd out everyone else). Set, not
+    raised, so a change of formula reorders what's already queued."""
+    today = date.today()
     rows = conn.execute(
-        "SELECT s.id, MAX(a.degree) AS degree FROM shows s"
+        "SELECT s.id, s.date, MAX(COALESCE(cs.priority, 0)) AS artist_priority FROM shows s"
         " JOIN billings b ON b.show_id = s.id JOIN artists a ON a.id = b.artist_id"
+        " LEFT JOIN crawl_state cs ON cs.source = 'setlistfm' AND cs.key = 'artist:' || a.id"
         " WHERE s.date < ? AND s.status NOT IN ('cancelled', 'postponed') AND s.is_festival = 0"
         " AND a.in_graph = 1"
         " AND (SELECT COUNT(*) FROM billings b2 WHERE b2.show_id = s.id) <= ?"
-        " GROUP BY s.id", (date.today().isoformat(), max_acts)).fetchall()
+        " GROUP BY s.id", (today.isoformat(), max_acts)).fetchall()
+    epoch = date(2000, 1, 1)
     for r in rows:
-        state.ensure(conn, SOURCE, f"show:{r['id']}", priority=r["degree"])
+        prio = max(0, (date.fromisoformat(r["date"]) - epoch).days)
+        if r["artist_priority"] >= setlistfm.NO_CAP_PRIORITY:   # seed.USER_PRIORITY
+            prio += PRIORITIZED
+        key = f"show:{r['id']}"
+        state.ensure(conn, SOURCE, key, priority=prio)
+        conn.execute("UPDATE crawl_state SET priority = ? WHERE source = ? AND key = ?", (prio, SOURCE, key))
     return len(rows)
 
 
 def _show(conn: sqlite3.Connection, show_id: int) -> dict | None:
     s = conn.execute(
-        "SELECT s.date, s.is_festival, v.name AS venue, v.city FROM shows s"
+        "SELECT s.id, s.date, s.is_festival, s.status, v.name AS venue, v.city, v.country FROM shows s"
         " JOIN venues v ON v.id = s.venue_id WHERE s.id = ?", (show_id,)).fetchone()
     if s is None:
         return None
     bill = conn.execute(
-        "SELECT a.name, b.role FROM billings b JOIN artists a ON a.id = b.artist_id"
-        " WHERE b.show_id = ? ORDER BY b.position", (show_id,)).fetchall()
-    return {"date": s["date"], "venue": s["venue"], "city": s["city"],
-            "is_festival": bool(s["is_festival"]), "acts": [b["name"] for b in bill]}
+        "SELECT a.id, a.name, a.in_graph FROM billings b JOIN artists a ON a.id = b.artist_id"
+        " WHERE b.show_id = ? ORDER BY b.position IS NULL, b.position, a.name", (show_id,)).fetchall()
+    lead = next((b for b in bill if b["in_graph"]), bill[0] if bill else None)
+    return {"id": s["id"], "date": s["date"], "venue": s["venue"], "city": s["city"],
+            "country": s["country"], "is_festival": bool(s["is_festival"]), "status": s["status"],
+            "acts": [b["name"] for b in bill],
+            "lead_id": lead["id"] if lead else None, "lead": lead["name"] if lead else None}
+
+
+def _qualifies(show: dict | None, max_acts: int) -> bool:
+    return bool(show and show["lead_id"] and len(show["acts"]) <= max_acts and not show["is_festival"]
+                and show["status"] not in ("cancelled", "postponed"))
+
+
+def tour_of(conn: sqlite3.Connection, seed_show: dict, max_acts: int, exclude: set) -> list[dict]:
+    """The seed show plus the lead artist's other due, qualifying shows that chain
+    to it with gaps of at most TOUR_GAP_DAYS; at most TOUR_MAX_SHOWS, nearest first."""
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    ids = [r["id"] for r in conn.execute(
+        "SELECT DISTINCT s.id FROM shows s JOIN billings b ON b.show_id = s.id"
+        " JOIN crawl_state cs ON cs.source = ? AND cs.key = 'show:' || s.id"
+        " WHERE b.artist_id = ? AND cs.next_due <= ? AND s.date BETWEEN ? AND ?",
+        (SOURCE, seed_show["lead_id"], now,
+         (date.fromisoformat(seed_show["date"]) - timedelta(days=TOUR_GAP_DAYS * TOUR_MAX_SHOWS)).isoformat(),
+         (date.fromisoformat(seed_show["date"]) + timedelta(days=TOUR_GAP_DAYS * TOUR_MAX_SHOWS)).isoformat()))]
+    cands = {seed_show["id"]: seed_show}
+    for i in ids:
+        if i not in cands and i not in exclude:
+            s = _show(conn, i)
+            if _qualifies(s, max_acts) and s["lead_id"] == seed_show["lead_id"]:
+                cands[i] = s
+    ordered = sorted(cands.values(), key=lambda s: (s["date"], s["id"]))
+    k = next(i for i, s in enumerate(ordered) if s["id"] == seed_show["id"])
+    lo = hi = k
+
+    def gap(a, b):
+        return (date.fromisoformat(b["date"]) - date.fromisoformat(a["date"])).days
+
+    while hi - lo + 1 < TOUR_MAX_SHOWS:
+        left = gap(ordered[lo - 1], ordered[lo]) if lo > 0 else None
+        right = gap(ordered[hi], ordered[hi + 1]) if hi + 1 < len(ordered) else None
+        left = left if left is not None and left <= TOUR_GAP_DAYS else None
+        right = right if right is not None and right <= TOUR_GAP_DAYS else None
+        if left is None and right is None:
+            break
+        if right is None or (left is not None and left <= right):
+            lo -= 1
+        else:
+            hi += 1
+    return ordered[lo: hi + 1]
+
+
+# ------------------------------------------------------------- queries
+
+def show_query(s: dict) -> str:
+    d = date.fromisoformat(s["date"])
+    city = f" {s['city']}" if s.get("city") else ""
+    return f'"{s["venue"]}"{city} {s["lead"]} {d:%B} {d.day} {d.year} support'
+
+
+def tour_queries(tour: list[dict]) -> list[str]:
+    if len(tour) == 1:
+        return [show_query(tour[0])]
+    artist, year = tour[0]["lead"], tour[0]["date"][:4]
+    countries = " ".join(sorted({s["country"] for s in tour if s.get("country")}))
+    venues = []
+    for s in tour:                      # spread over the tour: first, last, then the rest
+        if s["venue"] not in venues:
+            venues.append(s["venue"])
+    if len(venues) > VENUE_QUERY_MAX:
+        step = (len(venues) - 1) / (VENUE_QUERY_MAX - 1)
+        venues = [venues[round(i * step)] for i in range(VENUE_QUERY_MAX)]
+    return [" ".join(x for x in (artist, countries, year, "tour support") if x),
+            f"{artist} " + " ".join(f'"{v}"' for v in venues) + f" {year}"]
+
+
+# ------------------------------------------------------------- the run
+
+class Stop(Exception):
+    """Ends the run: a quota is spent."""
+
+
+class Run:
+    def __init__(self, conn, client, max_requests, max_credits, monthly_credits, max_acts, log):
+        self.conn, self.client, self.log = conn, client, log
+        self.max_requests, self.max_credits = max_requests, max_credits
+        self.monthly, self.max_acts = monthly_credits, max_acts
+        self.model = client.model or MODEL
+        self.stats = {"model": self.model, "tours": 0, "shows": 0, "searches": 0, "credits": 0,
+                      "pages": 0, "gemini_calls": 0, "tokens": 0, "specific": 0, "page_only": 0,
+                      "not_found": 0, "discovered": 0, "skipped": 0, "errors": 0, "stopped": None}
+        self.pages: dict[str, dict] = {}      # url -> {"url", "text", "words"}; fetched once per run
+        self.sleep = time.sleep
+
+    # budgets
+    def credits_left(self) -> int:
+        left = [math.inf]
+        if self.max_credits is not None:
+            left.append(self.max_credits - self.stats["credits"])
+        if self.monthly is not None:
+            left.append(self.monthly - credits_this_month(self.conn))
+        return min(left)
+
+    def calls_left(self) -> int:
+        return min(self.max_requests - self.stats["gemini_calls"],
+                   DAILY_LIMIT - state.requests_today(self.conn, SOURCE))
+
+    def can_afford(self, searches: int) -> bool:
+        return self.credits_left() >= searches * SEARCH_CREDITS and self.calls_left() >= 1
+
+    # requests
+    def call(self, send, name: str):
+        """send(), waiting out per-minute 429s; Stop when a quota is spent."""
+        for attempt in range(RETRIES_429 + 1):
+            resp = send()
+            if resp.status != 429:
+                return resp
+            wait = retry_wait(resp)
+            if (name == "Gemini" and daily_quota_spent(resp)) or wait > MAX_WAIT_429 or attempt == RETRIES_429:
+                self.log(f"  {name.lower()}: HTTP 429 {resp.text[:300]}")
+                raise Stop(f"{name} HTTP 429 (quota spent)")
+            self.log(f"  {name.lower()}: HTTP 429, waiting {wait:.0f}s")
+            self.sleep(wait)
+
+    def search(self, query: str) -> list[dict]:
+        db.begin_write(self.conn)
+        state.record_usage(self.conn, SEARCH, SEARCH_CREDITS)
+        self.conn.commit()
+        self.stats["searches"] += 1
+        self.stats["credits"] += SEARCH_CREDITS
+        resp = self.call(lambda: self.client.search(query), "Firecrawl")
+        if resp.status == 402:
+            self.log(f"  firecrawl: HTTP 402 {resp.text[:300]}")
+            raise Stop("Firecrawl HTTP 402 (credits spent)")
+        if resp.status != 200:
+            raise requests.RequestException(f"Firecrawl HTTP {resp.status} {resp.text[:200]}")
+        raw = resp.json()
+        used = raw.get("creditsUsed")
+        if isinstance(used, int) and used != SEARCH_CREDITS:
+            db.begin_write(self.conn)
+            state.record_usage(self.conn, SEARCH, used - SEARCH_CREDITS)
+            self.conn.commit()
+            self.stats["credits"] += used - SEARCH_CREDITS
+        return search_results(raw)
+
+    def fetch(self, urls: list[str]) -> list[dict]:
+        out = []
+        for u in urls[:MAX_PAGES]:
+            if u not in self.pages:
+                self.stats["pages"] += 1
+                try:
+                    r = self.client.page(u)
+                    text = page_text(r.text) if r.status == 200 else ""
+                except requests.RequestException:
+                    text = ""
+                self.pages[u] = {"url": u, "text": text, "words": _padded(text)}
+            if self.pages[u]["text"]:
+                out.append(self.pages[u])
+        return out
+
+    def ask(self, artist: str, shows: list[dict], pages: list[dict], snippets: list[dict]) -> dict | None:
+        prompt = build_prompt(artist, shows, [{"url": p["url"], "excerpt": excerpts(p["text"], shows)}
+                                              for p in pages], snippets)
+        db.begin_write(self.conn)
+        state.record_usage(self.conn, SOURCE)
+        self.conn.commit()
+        self.stats["gemini_calls"] += 1
+        resp = self.call(lambda: self.client.generate(self.model, prompt), "Gemini")
+        if resp.status != 200:
+            raise requests.RequestException(f"Gemini HTTP {resp.status} {resp.text[:200]}")
+        r = read_response(resp.json())
+        self.stats["tokens"] += r["tokens"]
+        answer = parse_answer(r["text"])
+        if answer is None:
+            self.log(f"  gemini: no JSON answer (finishReason {r['finish']})")
+        return answer
+
+    # one tour
+    def tour(self, tour: list[dict]) -> None:
+        artist = tour[0]["lead"]
+        self.log(f"  tour: {artist}, {len(tour)} show(s) {tour[0]['date']}..{tour[-1]['date']}")
+        snippets, urls = [], []
+        for q in tour_queries(tour):
+            for x in self.search(q):
+                if x["url"] not in urls:
+                    urls.append(x["url"])
+                    snippets.append(x)
+        pages = self.fetch(urls)
+        texts = pages + [{"url": x["url"], "words": _padded(f"{x['title']} {x['description']}")}
+                         for x in snippets]
+        answer = (self.ask(artist, tour, pages, snippets) if snippets else None) or {"shows": {}, "other_shows": []}
+        venues = [venue_core(s["venue"]) for s in tour]
+        for s in tour:      # a residency: the venue alone doesn't say which night
+            s["need_date"] = venues.count(venue_core(s["venue"])) > 1
+        results = {s["id"]: self.judge(s, answer["shows"].get(s["date"]), texts) for s in tour}
+        others = list(answer["other_shows"])
+        all_texts = list(texts)
+
+        fallbacks = 0
+        for s in tour:
+            if results[s["id"]]["specific"] or len(tour) == 1 or fallbacks >= MAX_FALLBACKS:
+                continue
+            if not self.can_afford(1):
+                break
+            fallbacks += 1
+            res = self.search(show_query(s))
+            if not res:
+                continue
+            new = [x for x in res if x["url"] not in urls]
+            spages = self.fetch([x["url"] for x in res])
+            stexts = spages + [{"url": x["url"], "words": _padded(f"{x['title']} {x['description']}")}
+                               for x in res]
+            a = self.ask(artist, [s], spages + [p for p in pages if p not in spages], res)
+            if a is None:
+                continue
+            all_texts += stexts
+            urls += [x["url"] for x in new]
+            r = self.judge(s, a["shows"].get(s["date"]), stexts + texts)
+            if r["specific"] or (not results[s["id"]]["acts"] and r["acts"]):
+                results[s["id"]] = r
+            others += a["other_shows"]
+
+        db.begin_write(self.conn)
+        for s in tour:
+            self.store(s, results[s["id"]])
+        self.discover(tour, others, all_texts)
+        self.conn.commit()
+
+    def judge(self, show: dict, ans: dict | None, texts: list[dict]) -> dict:
+        """Which acts of an answer hold up against the texts, and how firmly."""
+        out = {"specific": False, "acts": [], "quote": None, "url": None, "dropped": []}
+        if not ans or not ans["openers"]:
+            return out
+        headliner = ans["headliner"] or show["lead"]
+        acts = [(headliner, "headliner")] + [(o, "opener") for o in ans["openers"]
+                                             if norm(o) != norm(headliner)]
+        src = quote_source(ans["quote"], texts)
+        qwords = _padded(ans["quote"] or "")
+        keys = [norm(f) for f in date_forms(show["date"], numeric=True)] if show.get("need_date") \
+            else show_keys(show, numeric=True)
+        specific = bool(src) and any(f" {k} " in qwords for k in keys) \
+            and all(mentions(qwords, o) for o, role in acts if role == "opener")
+        show_pages = [t for t in texts if names_show(t["words"], show)]
+        for pos, (name, role) in enumerate(acts):
+            if specific and mentions(qwords, name):
+                out["acts"].append((name, role, pos, "specific", src["url"]))
+            else:
+                page = next((t for t in show_pages if mentions(t["words"], name)), None)
+                if page:
+                    out["acts"].append((name, role, pos, "page", page["url"]))
+                else:
+                    out["dropped"].append(name)
+        if not any(role == "opener" for _, role, *_ in out["acts"]):
+            out["acts"] = []
+        out["specific"] = specific
+        out["quote"] = ans["quote"] if specific else None
+        out["url"] = src["url"] if specific else None
+        return out
+
+    def store(self, show: dict, r: dict) -> None:
+        key = f"show:{show['id']}"
+        self.stats["shows"] += 1
+        if r["dropped"]:
+            self.log(f"    {show['date']}: not on any fetched page, dropped: {', '.join(r['dropped'])}")
+        if not r["acts"]:
+            state.mark_checked(self.conn, SOURCE, key, changed=False,
+                               min_days=NOT_FOUND_MIN_DAYS, max_days=NOT_FOUND_MAX_DAYS)
+            self.stats["not_found"] += 1
+            self.log(f"    {show['date']} {show['venue']}: nothing found")
+            return
+        for name, role, pos, check, url in r["acts"]:
+            conf = CONF_SPECIFIC if check == "specific" else CONF_PAGE
+            extra = {"model": self.model, "prompt_version": PROMPT_VERSION, "check": check,
+                     **({"quote": r["quote"][:500]} if check == "specific" and r["quote"] else {})}
+            aid = show["lead_id"] if norm(name) == norm(show["lead"]) else ledger.get_or_create_artist(self.conn, name)
+            ledger.add_claim(self.conn, show["id"], aid, SOURCE, key, role=role, confidence=conf,
+                             position=pos, url=url, extra=extra, resolve=False)
+        ledger.resolve_show(self.conn, show["id"])
+        if r["specific"]:
+            state.postpone(self.conn, SOURCE, key, DONE_DAYS)
+            self.stats["specific"] += 1
+        else:   # tour-wide evidence only: kept, and asked again later
+            state.mark_checked(self.conn, SOURCE, key, changed=False,
+                               min_days=NOT_FOUND_MIN_DAYS, max_days=NOT_FOUND_MAX_DAYS)
+            self.stats["page_only"] += 1
+        self.log(f"    {show['date']} {show['venue']}: "
+                 + ", ".join(f"{n} ({role}, {check})" for n, role, _, check, _ in r["acts"]))
+
+    def discover(self, tour: list[dict], others: list[dict], texts: list[dict]) -> None:
+        """Add the artist's shows that the pages list but the ledger lacks."""
+        lead_id, artist = tour[0]["lead_id"], tour[0]["lead"]
+        lo = date.fromisoformat(tour[0]["date"]) - timedelta(days=DISCOVER_DAYS)
+        hi = date.fromisoformat(tour[-1]["date"]) + timedelta(days=DISCOVER_DAYS)
+        countries = {s["country"] for s in tour if s.get("country")}
+        seen = set()
+        for o in others:
+            try:
+                d = date.fromisoformat(o["date"])
+            except ValueError:
+                continue
+            if not lo <= d <= hi or (o["date"], norm(o["venue"])) in seen:
+                continue
+            if norm(o["venue"]) in (norm(o["city"]), norm(o["country"])):
+                continue                                # a tour listing by city: no venue to file it under
+            seen.add((o["date"], norm(o["venue"])))
+            src = quote_source(o["quote"], texts)
+            qwords = _padded(o["quote"])
+            cand = {"date": o["date"], "venue": o["venue"], "city": o["city"]}
+            if not src or not mentions(qwords, o["venue"]) or not any(
+                    f" {k} " in qwords for k in show_keys(cand, numeric=True, city=False) if k != norm(o["venue"])):
+                self.log(f"    other show {o['date']} {o['venue']}: quote not verified, skipped")
+                continue
+            if not (mentions(src["words"], artist) or mentions(qwords, artist)):
+                continue
+            # Known already: the artist on that date anywhere, or a day off in the same city
+            # (some sources date a late show to the next day).
+            near = self.conn.execute(
+                "SELECT 1 FROM shows s JOIN claims c ON c.show_id = s.id JOIN venues v ON v.id = s.venue_id"
+                " WHERE c.artist_id = ? AND (s.date = ? OR (s.date BETWEEN ? AND ? AND v.city_norm = ?)) LIMIT 1",
+                (lead_id, o["date"], (d - timedelta(days=1)).isoformat(), (d + timedelta(days=1)).isoformat(),
+                 norm(o["city"]))).fetchone()
+            if near:
+                continue                                # already known (maybe under another venue name)
+            country = o["country"] or (next(iter(countries)) if len(countries) == 1 else None)
+            vid = ledger.get_or_create_venue(self.conn, o["venue"], o["city"], country=country)
+            native = f"found:{lead_id}:{o['date']}"
+            headliner = o["headliner"] or artist
+            acts = [(headliner, "headliner")] + [(x, "opener") for x in o["openers"] if norm(x) != norm(headliner)]
+            if not any(norm(n) == norm(artist) for n, _ in acts):
+                acts.append((artist, "unknown"))
+            show_id = ledger.find_or_create_show(self.conn, o["date"], vid, {lead_id}, SOURCE, native)
+            stored = []
+            for pos, (name, role) in enumerate(acts):
+                in_quote = mentions(qwords, name)
+                if not (in_quote or norm(name) == norm(artist)):
+                    continue                            # an act the quote doesn't name: not trusted
+                aid = lead_id if norm(name) == norm(artist) else ledger.get_or_create_artist(self.conn, name)
+                ledger.add_claim(self.conn, show_id, aid, SOURCE, native, role=role,
+                                 confidence=CONF_SPECIFIC if in_quote else CONF_PAGE,
+                                 position=pos if role != "unknown" else None, url=src["url"],
+                                 extra={"model": self.model, "prompt_version": PROMPT_VERSION,
+                                        "check": "discovered", "quote": o["quote"][:500]},
+                                 resolve=False)
+                stored.append(f"{name} ({role})")
+            ledger.resolve_show(self.conn, show_id)
+            self.stats["discovered"] += 1
+            self.log(f"    NEW show {o['date']} {o['venue']}, {o['city'] or '?'}: {', '.join(stored)}")
 
 
 def ask(conn: sqlite3.Connection, client: Client, max_requests: int = DAILY_LIMIT,
+        max_credits: int | None = None, monthly_credits: int | None = MONTHLY_CREDITS,
         max_acts: int = MAX_ACTS, log=print) -> dict:
-    stats = {"requests": 0, "found": 0, "verified": 0, "not_found": 0, "skipped": 0,
-             "errors": 0, "search_queries": 0, "stopped": None}
+    """Spend search credits and Gemini calls on due shows, a tour at a time, until a
+    provider's quota (or a cap) is reached or nothing is due.
+    Commits before every network request; holds the write lock only to store (see
+    "Concurrency" in docs/ARCHITECTURE.md)."""
+    run = Run(conn, client, max_requests, max_credits, monthly_credits, max_acts, log)
+    stats = run.stats
     db.begin_write(conn)
     queue_shows(conn, max_acts)
     conn.commit()
 
-    def budget_left() -> bool:
-        return stats["requests"] < max_requests and state.requests_today(conn, SOURCE) < DAILY_LIMIT
-
-    if not budget_left():
-        stats["stopped"] = "daily limit"
-        return stats
-    model = client.model or pick_model(client.list_models())
-    if not model:
-        raise RuntimeError("no stable Gemini Flash model found; set GEMINI_MODEL")
-    stats["model"] = model
+    handled: set[int] = set()
     errors = 0
-    for row in state.due(conn, SOURCE, limit=10_000):
-        if not budget_left():
-            stats["stopped"] = "daily limit"
-            break
-        result = _ask(conn, client, model, row, max_acts, stats, log)
-        conn.commit()
-        if result == "quota":
-            stats["stopped"] = "HTTP 429 (quota spent)"
-            break
-        errors = errors + 1 if result == "error" else 0
-        if errors >= MAX_ERRORS:
-            stats["stopped"] = f"{MAX_ERRORS} errors in a row"
-            break
-    return stats
-
-
-def _ask(conn, client, model, row, max_acts, stats, log) -> str:
-    """One show. Commits before every network call and takes the write lock
-    (db.begin_write) only to store what came back; see "Concurrency" in
-    docs/ARCHITECTURE.md."""
-    key = row["key"]
-    show_id = int(key.split(":", 1)[1])
-    db.begin_write(conn)
-    show = _show(conn, show_id)
-    if show is None or len(show["acts"]) > max_acts or show["is_festival"]:
-        # Another source filled it in (or max_acts was lowered). Forgotten rather than
-        # postponed, so queue_shows brings it back if it qualifies again.
-        state.forget(conn, SOURCE, key)
-        stats["skipped"] += 1
-        return "skipped"
-
-    # Counted (and committed) before the request: a crash can't hide spent quota.
-    state.record_usage(conn, SOURCE)
-    conn.commit()
-    stats["requests"] += 1
-    try:
-        resp = client.generate(model, build_prompt(show))
-    except requests.RequestException as e:
-        log(f"  gemini show {show_id}: {type(e).__name__}")
-        db.begin_write(conn)
-        state.mark_failed(conn, SOURCE, key)
-        stats["errors"] += 1
-        return "error"
-    if resp.status == 429:
-        log(f"  gemini: HTTP 429 {resp.text[:300]}")
-        return "quota"
-    if resp.status != 200:
-        log(f"  gemini show {show_id}: HTTP {resp.status} {resp.text[:300]}")
-        db.begin_write(conn)
-        state.mark_failed(conn, SOURCE, key)
-        stats["errors"] += 1
-        return "error"
-
-    r = read_response(resp.json())
-    stats["search_queries"] += len(r["queries"])
-    answer = parse_answer(r["text"])
-    if answer is None or not answer["openers"]:
-        if answer is None:
-            log(f"  gemini show {show_id}: no JSON answer (finishReason {r['finish']})")
-        db.begin_write(conn)
-        state.mark_checked(conn, SOURCE, key, changed=False,
-                           min_days=NOT_FOUND_MIN_DAYS, max_days=NOT_FOUND_MAX_DAYS)
-        stats["not_found"] += 1
-        return "not_found"
-
-    pages = _fetch_evidence(client, answer, r["sources"])
-    db.begin_write(conn)
-    acts = ([(answer["headliner"], "headliner")] if answer["headliner"] else []) + [
-        (o, "opener") for o in answer["openers"] if norm(o) != norm(answer["headliner"])]
-    for pos, (name, role) in enumerate(acts):
-        check, url, snippet = _check(name, pages)
-        conf = {"page": CONF_VERIFIED, "absent": CONF_ABSENT, "unchecked": CONF_UNCHECKED}[check]
-        if not answer["confident"]:
-            conf *= UNSURE_FACTOR
-        quotes = [e["quote"] for e in answer["evidence"] if mentions(f" {norm(e['quote'])} ", name)]
-        extra = {"model": model, "prompt_version": PROMPT_VERSION, "check": check,
-                 "quote_on_page": any(mentions(p["words"], q) for q in quotes for p in pages),
-                 "grounded": bool(r["sources"]), "search_queries": len(r["queries"]),
-                 **({"snippet": snippet} if snippet else {})}
-        aid = ledger.get_or_create_artist(conn, name)
-        ledger.add_claim(conn, show_id, aid, SOURCE, key, role=role, confidence=round(conf, 3),
-                         position=pos, url=url or _first_url(answer, r["sources"]),
-                         extra=extra, resolve=False)
-        if role == "opener" and check == "page":
-            stats["verified"] += 1
-    ledger.resolve_show(conn, show_id)
-    state.postpone(conn, SOURCE, key, DONE_DAYS)
-    stats["found"] += 1
-    log(f"  gemini {show['date']} {show['venue']}: "
-        + ", ".join(f"{n} ({role})" for n, role in acts))
-    return "found"
-
-
-def _fetch_evidence(client, answer, sources) -> list[dict]:
-    """Fetch the cited pages (the model's evidence first, then grounding sources)."""
-    urls = []
-    for u in [e["url"] for e in answer["evidence"]] + sources:
-        if u.startswith(("http://", "https://")) and u not in urls:
-            urls.append(u)
-    pages = []
-    for u in urls[:MAX_PAGES]:
-        try:
-            resp = client.page(u)
-        except requests.RequestException:
+    for row in state.due(conn, SOURCE, limit=100_000):
+        show_id = int(row["key"].split(":", 1)[1])
+        if show_id in handled:
             continue
-        if resp.status == 200:
-            pages.append({"url": resp.url or u, "words": page_words(resp.text)})
-    return pages
-
-
-def _check(name: str, pages: list[dict]) -> tuple[str, str | None, str | None]:
-    """(check, url of the page naming the act, normalized text around the name)."""
-    for p in pages:
-        if mentions(p["words"], name):
-            i = p["words"].find(f" {norm(name)} ")
-            snippet = p["words"][max(0, i - SNIPPET_CHARS): i + len(norm(name)) + 2 + SNIPPET_CHARS].strip()
-            return "page", p["url"], snippet
-    return ("absent" if pages else "unchecked"), None, None
-
-
-def _first_url(answer, sources) -> str | None:
-    urls = [e["url"] for e in answer["evidence"] if e["url"]] + sources
-    return urls[0] if urls else None
+        show = _show(conn, show_id)
+        if not _qualifies(show, max_acts):
+            # Another source filled it in (or max_acts was lowered). Forgotten rather than
+            # postponed, so queue_shows brings it back if it qualifies again.
+            db.begin_write(conn)
+            state.forget(conn, SOURCE, row["key"])
+            conn.commit()
+            stats["skipped"] += 1
+            continue
+        tour = tour_of(conn, show, max_acts, handled)
+        if not run.can_afford(len(tour_queries(tour))):
+            stats["stopped"] = "budget spent"
+            break
+        handled.update(s["id"] for s in tour)
+        stats["tours"] += 1
+        try:
+            run.tour(tour)
+            errors = 0
+        except Stop as e:
+            conn.rollback()
+            stats["stopped"] = str(e)
+            break
+        except (requests.RequestException, ValueError) as e:
+            conn.rollback()
+            log(f"  {show['lead']} tour: {type(e).__name__} {str(e)[:200]}")
+            db.begin_write(conn)
+            for s in tour:
+                state.mark_failed(conn, SOURCE, f"show:{s['id']}")
+            conn.commit()
+            stats["errors"] += 1
+            errors += 1
+            if errors >= MAX_ERRORS:
+                stats["stopped"] = f"{MAX_ERRORS} errors in a row"
+                break
+    return stats

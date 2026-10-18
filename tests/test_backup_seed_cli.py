@@ -112,14 +112,22 @@ def test_smoke_run_with_fake_sources(tmp_path, monkeypatch):
             return ok(fixture_text("pollstar_events_zebulon.json"))
 
     class FakeGemini:
-        model = "gemini-3.8-flash"
+        model = "gemini-test"
 
         def __init__(self, *a, **k):
             pass
 
+        def search(self, query):
+            assert "Iguana Death Cult" in query
+            return ok(json.dumps({"creditsUsed": 2, "data": {"web": [
+                {"url": "https://example.com/e", "title": "Iguana Death Cult \u2014 Zebulon", "description": ""}]}}))
+
         def generate(self, model, prompt):
-            assert "Iguana Death Cult" in prompt
-            return ok(fixture_text("gemini_generate_zebulon.json"))
+            assert "Zebulon" in prompt
+            text = json.dumps({"shows": [{"date": "2026-09-17", "headliner": "Iguana Death Cult",
+                                          "openers": ["Flat Worms"], "url": "https://example.com/e",
+                                          "show_specific_quote": "Iguana Death Cult with Flat Worms"}]})
+            return ok(json.dumps({"candidates": [{"content": {"parts": [{"text": text}]}}]}))
 
         def page(self, url):
             return ok(fixture_text("event_page.html"))
@@ -130,6 +138,7 @@ def test_smoke_run_with_fake_sources(tmp_path, monkeypatch):
     monkeypatch.setattr(gemini, "Client", FakeGemini)
     monkeypatch.setenv("SETLISTFM_API_KEY", "test")
     monkeypatch.setenv("GEMINI_API_KEY", "test")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "test")
     assert smoke.run(tmp_path / "smoke", str(g), log=lambda *_: None)
     assert calls[0] == "5f647289-9ff8-494d-a349-7a388307ddde"   # the test artist, not 1,500 others
     assert "x1" not in calls

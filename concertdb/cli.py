@@ -145,14 +145,27 @@ def _gemini_client(args):
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
         sys.exit("set GEMINI_API_KEY (get one at https://aistudio.google.com/apikey)")
-    return gemini.Client(Fetcher(_data_dir(args), min_interval=gemini.MIN_INTERVAL),
-                         Fetcher(_data_dir(args), min_interval=gemini.PAGE_INTERVAL),
-                         key, model=args.model or os.environ.get("GEMINI_MODEL") or None)
+    search_key = os.environ.get("FIRECRAWL_API_KEY")
+    if not search_key:
+        sys.exit("set FIRECRAWL_API_KEY (https://www.firecrawl.dev/app/api-keys):"
+                 " Gemini reads the pages a Firecrawl search finds")
+    d = _data_dir(args)
+    return gemini.Client(Fetcher(d, min_interval=gemini.MIN_INTERVAL),
+                         Fetcher(d, min_interval=gemini.SEARCH_INTERVAL),
+                         Fetcher(d, min_interval=gemini.PAGE_INTERVAL),
+                         key, search_key, model=args.model or os.environ.get("GEMINI_MODEL") or None)
+
+
+def _monthly_credits() -> int | None:
+    v = os.environ.get("FIRECRAWL_MONTHLY_CREDITS")
+    return int(v) if v else gemini.MONTHLY_CREDITS
 
 
 def cmd_gemini(args):
     conn = _conn(args)
-    print(gemini.ask(conn, _gemini_client(args), max_requests=args.max_requests, max_acts=args.max_acts))
+    print(gemini.ask(conn, _gemini_client(args), max_requests=args.max_requests,
+                     max_credits=args.max_credits, monthly_credits=_monthly_credits(),
+                     max_acts=args.max_acts))
 
 
 def cmd_run(args):
@@ -310,9 +323,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--max-requests", type=int, default=setlistfm.DAILY_LIMIT)
     s.set_defaults(fn=cmd_crawl_setlistfm, locked="crawl")
 
-    s = sub.add_parser("gemini", help="ask Gemini (with Google Search) for openers of shows that lack one")
-    s.add_argument("--max-requests", type=int, default=gemini.DAILY_LIMIT)
-    s.add_argument("--model", help="default: $GEMINI_MODEL, else the newest stable Flash")
+    s = sub.add_parser("gemini", help="find openers of shows that lack one: Firecrawl search,"
+                       " fetched pages, Gemini reads them (a tour at a time)")
+    s.add_argument("--max-requests", type=int, default=gemini.DAILY_LIMIT, help="Gemini calls this run")
+    s.add_argument("--max-credits", type=int, default=None,
+                   help="Firecrawl credits this run (default: no cap; the run stops when Firecrawl"
+                        " is out of credits, or at $FIRECRAWL_MONTHLY_CREDITS a calendar month if set)")
+    s.add_argument("--model", help=f"default: $GEMINI_MODEL, else {gemini.MODEL}")
     s.add_argument("--max-acts", type=int, default=int(os.environ.get("GEMINI_MAX_ACTS") or gemini.MAX_ACTS),
                    help="only ask about shows with at most this many acts listed"
                         f" (default: $GEMINI_MAX_ACTS, else {gemini.MAX_ACTS})")
