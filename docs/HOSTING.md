@@ -9,8 +9,8 @@
 - **Disk:** the database (tens of MB, growing slowly), 7 local snapshots, and
   30 days of compressed raw archive (older days are deleted after each backup).
 - **Uptime:** it has to run *once a day*, not continuously. The optional
-  Gemini step (`concertdb gemini`) runs for a few more hours a day, alongside
-  the crawl.
+  Gemini step (`concertdb gemini`) runs for up to a few hours,
+  alongside the crawl.
 
 ## What happens if the machine is off
 
@@ -91,7 +91,8 @@ Windows Task Scheduler.
    in `data/pollstar.log`). They run side by side; see "Concurrency" in
    docs/ARCHITECTURE.md.
    A third task, `concert-database-gemini`, starts at 1 am (`deploy/run-gemini.sh`,
-   log in `data/gemini.log`; it exits quickly when `GEMINI_API_KEY` isn't set).
+   log in `data/gemini.log`; it exits quickly when `GEMINI_API_KEY` or
+   `FIRECRAWL_API_KEY` isn't set).
    The 1 am start is in the PC's own time; the Gemini step's budget follows
    the Pacific day whatever the time zone, so the start time only matters for
    using a fresh quota early.
