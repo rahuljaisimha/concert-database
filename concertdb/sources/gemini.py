@@ -34,7 +34,8 @@ Budgets: spend what the providers allow, as fast as their per-minute limits
 allow. Every request is counted (and committed) before it is sent, so a crash
 can't hide spent quota.
   - context.dev (usage source "contextdev", in credits): searches
-    CONTEXTDEV_INTERVAL apart (free plan: 10 a minute, 2 at once), with
+    CONTEXTDEV_INTERVAL apart (free plan: 10 a minute, 2 at once), at most
+    CONTEXTDEV_MAX_CREDITS a run (CONTEXT_DEV_MAX_CREDITS), with
     highlights (the passages relevant to the query: 2 credits a search). A
     page we can't fetch ourselves (Facebook events) is read from its
     highlights. Out of credits (HTTP 401/402/403, or credits_remaining 0) or 3
@@ -84,6 +85,7 @@ SEARXNG = "searxng"         # usage source for SearXNG searches; responses archi
 CONTEXTDEV = "contextdev"   # usage source for context.dev credits; trimmed responses archived here
 CONTEXTDEV_API = "https://api.context.dev/v1/web/search"
 CONTEXTDEV_INTERVAL = 6.5   # free plan: 10 requests a minute
+CONTEXTDEV_MAX_CREDITS = 1500     # per run (CONTEXT_DEV_MAX_CREDITS); a night's run needs ~1,000-1,300
 CONTEXTDEV_HIGHLIGHT_CHARS = 2000   # highlights: the passages relevant to the query, +1 credit per 10 results
 SEARCH_ORDER = ("contextdev", "searxng")   # then Firecrawl; SEARCH_ORDER in .env changes it
 SEARXNG_INTERVAL = 15.0     # between SearXNG searches: Google flagged "unusual traffic" after ~100
@@ -426,7 +428,7 @@ class Client:
                  key: str, search_key: str | None, model: str | None = None,
                  searxng_url: str | None = None, searxng_fetcher: Fetcher | None = None,
                  contextdev_key: str | None = None, contextdev_fetcher: Fetcher | None = None,
-                 search_order=SEARCH_ORDER):
+                 search_order=SEARCH_ORDER, contextdev_max_credits: int = CONTEXTDEV_MAX_CREDITS):
         self.fetcher = fetcher
         self.search_fetcher = search_fetcher
         self.page_fetcher = page_fetcher
@@ -438,6 +440,7 @@ class Client:
         self.contextdev_headers = {"Authorization": f"Bearer {contextdev_key}"} if contextdev_key else None
         self.contextdev_fetcher = contextdev_fetcher or search_fetcher
         self.search_order = tuple(search_order)
+        self.contextdev_max_credits = contextdev_max_credits
 
     @property
     def has_contextdev(self) -> bool:
@@ -504,7 +507,8 @@ def client_from_env(data_dir, model: str | None = None, env=None) -> "Client":
                   key, search_key, model=model or env.get("GEMINI_MODEL") or None,
                   searxng_url=searxng_url, searxng_fetcher=Fetcher(data_dir, min_interval=SEARXNG_INTERVAL),
                   contextdev_key=contextdev_key, contextdev_fetcher=Fetcher(data_dir, min_interval=CONTEXTDEV_INTERVAL),
-                  search_order=order)
+                  search_order=order,
+                  contextdev_max_credits=int(env.get("CONTEXT_DEV_MAX_CREDITS") or CONTEXTDEV_MAX_CREDITS))
 
 
 def searxng_results(raw: dict) -> tuple[list[dict], list[str]]:
@@ -690,6 +694,7 @@ class Run:
         self.firecrawl_on = getattr(client, "has_firecrawl", True)
         self.contextdev_on = getattr(client, "has_contextdev", False)
         self.contextdev_fails = 0
+        self.contextdev_cap = getattr(client, "contextdev_max_credits", CONTEXTDEV_MAX_CREDITS)
         self.order = tuple(getattr(client, "search_order", SEARCH_ORDER))
         self.stats = {"model": self.model, "tours": 0, "shows": 0, "searches": 0, "searxng": 0,
                       "contextdev": 0, "contextdev_credits": 0, "credits": 0,
@@ -740,6 +745,11 @@ class Run:
         """The first search in self.order that answers (context.dev, SearXNG), else Firecrawl."""
         for backend in self.order:
             results = None
+            if backend == "contextdev" and self.contextdev_on \
+                    and self.stats["contextdev_credits"] + 2 > self.contextdev_cap:
+                self.contextdev_on = False
+                self.log(f"  context.dev: {self.stats['contextdev_credits']} credits spent this run"
+                         f" (cap {self.contextdev_cap}), switched off")
             if backend == "contextdev" and self.contextdev_on:
                 results = self.search_contextdev(query)
             elif backend == "searxng" and self.searxng_on:

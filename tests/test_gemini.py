@@ -786,3 +786,16 @@ def test_search_order_from_env(tmp_path):
     assert c.has_contextdev and c.search_order == ("contextdev", "searxng")
     c = gemini.client_from_env(tmp_path, env={**env, "SEARCH_ORDER": "searxng,contextdev"})
     assert c.search_order == ("searxng", "contextdev")
+
+
+def test_contextdev_credit_cap_per_run(conn):
+    ty_tour(conn)
+    c = ty_client()
+    client = CtxClient(c.answers, ctx={"tour support": ctx((TOUR_URL, "Ty Segall Australian Tour", "", ""))},
+                       searx={"Ty Segall": searx((TOUR_URL, "Ty Segall Australian Tour", ""))}, pages=c.pages)
+    client.contextdev_max_credits = 4                       # two searches' worth
+    stats = gemini.ask(conn, client, **QUIET)
+    assert len(client.ctx_queries) == 2 and stats["contextdev_credits"] == 4
+    assert stats["searxng"] == 1                            # the third search went to SearXNG
+    assert gemini.client_from_env(__import__("pathlib").Path("."), env={
+        "GEMINI_API_KEY": "k", "CONTEXT_DEV_API_KEY": "c", "CONTEXT_DEV_MAX_CREDITS": "300"}).contextdev_max_credits == 300
