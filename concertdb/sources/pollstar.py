@@ -26,7 +26,6 @@ Units of work:
 processes can share the database (see db.begin_write).
 """
 
-import gzip
 import hashlib
 import html
 import json
@@ -34,7 +33,6 @@ import os
 import sqlite3
 import time
 from datetime import date, timedelta
-from pathlib import Path
 
 import requests
 
@@ -144,10 +142,10 @@ def ingest_event(conn: sqlite3.Connection, e: dict, venue_id: int) -> int:
                                          source=SOURCE, native_id=e["id"])
     for pos, (aid, role, conf) in enumerate(acts):
         ledger.add_claim(conn, show_id, aid, SOURCE, e["id"], role=role, confidence=conf, position=pos,
-                         url=e["url"], extra={"title": e["name"], "date": e["date"]}, resolve=False)
-    ledger.resolve_show(conn, show_id)  # recomputes is_festival from act count
-    if e["is_festival"]:
-        conn.execute("UPDATE shows SET is_festival = 1 WHERE id = ?", (show_id,))
+                         url=e["url"], extra={"title": e["name"], "date": e["date"],
+                                              **({"festival": True} if e["is_festival"] else {})},
+                         resolve=False)
+    ledger.resolve_show(conn, show_id)  # is_festival: act count, or the claims' festival flag
     return show_id
 
 
@@ -213,49 +211,6 @@ def add_venue(conn: sqlite3.Connection, client: Client, name: str, city: str | N
     if v:
         _link(conn, v)
     return v
-
-
-def rematch_archived(conn: sqlite3.Connection, data_dir, log=print) -> dict:
-    """Retry venue lookups that found no match, using the autocomplete answers already
-    in the raw archive (no requests). For lookups made before names were un-escaped:
-    "Stubb&#39;s" never matched "Stubb's"."""
-    from urllib.parse import unquote, urlparse
-    answers: dict[str, str] = {}   # query → newest archived autocomplete body
-    for f in sorted((Path(data_dir) / "raw" / SOURCE).glob("*.jsonl.gz")):
-        with gzip.open(f, "rt", encoding="utf-8") as fh:
-            for line in fh:
-                try:
-                    rec = json.loads(line)
-                except ValueError:
-                    continue
-                url = rec.get("url") or ""
-                if "autocomplete." in url:
-                    answers[unquote(urlparse(url).path.rsplit("/", 1)[-1])] = rec.get("body") or ""
-    stats = {"misses": 0, "archived": 0, "matched": 0}
-    db.begin_write(conn)
-    rows = conn.execute(
-        "SELECT cs.key, v.id, v.name, v.city FROM crawl_state cs"
-        " JOIN venues v ON cs.key = 'resolve:' || v.id"
-        " WHERE cs.source = ? AND cs.interval_days = ? AND v.id NOT IN"
-        " (SELECT venue_id FROM venue_source_ids WHERE source = ?)",
-        (SOURCE, NO_MATCH_DAYS, SOURCE)).fetchall()
-    for r in rows:
-        stats["misses"] += 1
-        body = answers.get(r["name"])
-        if body is None:
-            continue
-        stats["archived"] += 1
-        try:
-            match = match_venue(parse_venues(json.loads(body)), r["name"], r["city"])
-        except (ValueError, KeyError, TypeError):
-            continue
-        if match:
-            _link(conn, match, r["id"])
-            state.postpone(conn, SOURCE, r["key"], 10 * 365)
-            stats["matched"] += 1
-            log(f"  {r['name']}, {r['city']} → pollstar {match['id']}")
-    conn.commit()
-    return stats
 
 
 def _link(conn: sqlite3.Connection, v: dict, venue_id: int | None = None) -> int:

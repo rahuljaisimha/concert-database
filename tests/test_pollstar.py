@@ -242,30 +242,6 @@ def test_norm_unescapes():
     assert norm("Bar &amp; Grill") == norm("Bar & Grill") == "bar and grill"
 
 
-def test_rematch_earlier_misses_from_archive(conn, tmp_path):
-    import gzip
-    from urllib.parse import quote
-    v = ledger.get_or_create_venue(conn, "Stubb's Waller Creek Amphitheatre", "Austin")
-    ledger.find_or_create_show(conn, "2026-01-10", v)
-    other = ledger.get_or_create_venue(conn, "Nowhere Club", "Austin")
-    ledger.find_or_create_show(conn, "2026-01-10", other)
-    # Both looked up before the fix: both stored as "no match".
-    pollstar.queue_venues_to_resolve(conn)
-    for vid in (v, other):
-        state.postpone(conn, "pollstar", f"resolve:{vid}", pollstar.NO_MATCH_DAYS)
-    raw = tmp_path / "raw" / "pollstar"
-    raw.mkdir(parents=True)
-    with gzip.open(raw / "2026-10-17.jsonl.gz", "wt") as f:
-        for q, body in (("Stubb's Waller Creek Amphitheatre", ESCAPED.text), ("Nowhere Club", '{"response": {"docs": []}}')):
-            f.write(json.dumps({"url": pollstar.AUTOCOMPLETE.format(q=quote(q, safe="")), "body": body}) + "\n")
-    stats = pollstar.rematch_archived(conn, tmp_path, log=lambda *_: None)
-    assert stats == {"misses": 2, "archived": 2, "matched": 1}
-    assert conn.execute("SELECT venue_id FROM venue_source_ids WHERE source = 'pollstar' AND native_id = '300487'"
-                        ).fetchone()[0] == v
-    assert state.get(conn, "pollstar", "venue:300487") is not None        # its event list is now due
-    assert pollstar.rematch_archived(conn, tmp_path, log=lambda *_: None)["matched"] == 0
-
-
 def test_unchanged_event_lists_are_not_archived_again(conn, tmp_path):
     from concertdb.http import Fetcher
 

@@ -7,7 +7,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from . import backup, db, export, ledger, repair, seed, smoke, state, status
+from . import backup, db, export, ledger, seed, smoke, state, status
 from .http import Fetcher
 from .normalize import norm
 from .sources import gemini, jsonld, pollstar, setlistfm
@@ -131,10 +131,6 @@ def cmd_pollstar(args):
     print(pollstar.capture(conn, _pollstar_client(args), max_requests=args.max_requests))
 
 
-def cmd_pollstar_rematch(args):
-    print(pollstar.rematch_archived(_conn(args), _data_dir(args)))
-
-
 def cmd_crawl_setlistfm(args):
     conn = _conn(args)
     stats = setlistfm.crawl(conn, _setlistfm_client(args), max_requests=args.max_requests)
@@ -224,16 +220,6 @@ def cmd_restore(args):
     backup.restore(Path(args.db), _data_dir(args))
 
 
-def cmd_repair_shows(args):
-    """Split shows the old ±1-day rule merged (see concertdb/repair.py)."""
-    plock = _lock(args, "pollstar")   # the Pollstar process writes shows too: wait for it to stop
-    try:
-        stats = repair.repair_shows(_conn(args), _data_dir(args), dry_run=args.dry_run)
-    finally:
-        plock.close()
-    print(stats)
-
-
 def cmd_smoke_test(args):
     ok = smoke.run(_data_dir(args) / "smoke", args.graph, args.page_url)
     sys.exit(0 if ok else 1)
@@ -315,10 +301,6 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--max-requests", type=int, default=pollstar.DAILY_LIMIT)
     s.set_defaults(fn=cmd_pollstar, locked="pollstar")
 
-    s = sub.add_parser("pollstar-rematch", help="retry Pollstar venue lookups that found no match,"
-                       " from archived answers (no requests)")
-    s.set_defaults(fn=cmd_pollstar_rematch, locked="pollstar")
-
     s = sub.add_parser("crawl-setlistfm", help="spend setlist.fm requests on due artists/venues")
     s.add_argument("--max-requests", type=int, default=setlistfm.DAILY_LIMIT)
     s.set_defaults(fn=cmd_crawl_setlistfm, locked="crawl")
@@ -352,10 +334,6 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--min-conf", type=float, default=0.4)
     s.add_argument("--graph-only", action="store_true", help="only artists in the MusicSceneMap graph")
     s.set_defaults(fn=cmd_export)
-
-    s = sub.add_parser("repair-shows", help="split shows that the old ±1-day rule merged wrongly")
-    s.add_argument("--dry-run", action="store_true", help="report what would change, save nothing")
-    s.set_defaults(fn=cmd_repair_shows, locked="crawl")
 
     s = sub.add_parser("smoke-test", help="a few live requests per source into a throwaway database")
     s.add_argument("--graph", default=seed.GRAPH_URL)

@@ -28,12 +28,6 @@ to (an event from Pollstar or a venue page, one setlist from setlist.fm):
   manual entries), and never two different setlists by the same act (a
   residency's nights), even on the same date.
 
-Until October 2026 any two records a day apart were merged, which joined
-consecutive nights into one bill (and invented openers between them).
-`concertdb repair-shows` splits shows stored that way, using each record's
-own date (kept in the claim since then, or read back from the raw archive).
-It is safe to run again; `--dry-run` reports without saving.
-
 Sources only ever add claims. `ledger.resolve_show()` turns claims into
 billings: each source's vote is weighted (`SOURCE_WEIGHTS`: manual 1.0,
 schema.org 0.9, setlist.fm 0.8, Gemini/LLM 0.6), agreeing sources raise confidence
@@ -82,8 +76,7 @@ source, and claims keep their own event date. So it is kept short:
   `CONCERTDB_RAW_KEEP_DAYS`, 0 = keep everything) and in R2 (a lifecycle
   rule deletes `raw/` objects after 30 days; see docs/HOSTING.md).
 - **Pollstar event lists** are archived only when they changed; an unchanged
-  recheck stores nothing. Venue lookups (autocomplete) are always archived;
-  `pollstar-rematch` uses them.
+  recheck stores nothing. Venue lookups (autocomplete) are always archived.
 - **Pages fetched for Gemini are not archived.** A `specific` claim keeps its
   quote (`extra.quote`). Search results and Gemini's answers are archived
   (`data/raw/firecrawl/`, `data/raw/gemini/`).
@@ -153,9 +146,7 @@ about, on a schedule, with tight limits:
 - each venue's name is looked up once; the match (or the miss) is stored and
   not asked again (misses are retried after a year). Autocomplete names come
   HTML-escaped ("Stubb&#39;s", "Bar &amp; Grill") and are un-escaped before
-  matching (`normalize.norm` also un-escapes, for any source);
-  `concertdb pollstar-rematch` re-checks earlier misses against the archived
-  answers without new requests
+  matching (`normalize.norm` also un-escapes, for any source)
 - event lists are fetched 1,000 events a page (the website uses 50), so a
   venue's upcoming shows are almost always one request
 - event lists are rechecked every 3 days, backing off to 14 days when the
@@ -184,14 +175,25 @@ at a time:
    city and date goes into ONE Gemini call for the whole tour, which answers per
    show: headliner, openers, and a quote naming THIS show with its openers.
 4. A show is done only when that quote is on a fetched page (or a search
-   result), names the show (venue, city or date) and contains every opener. A
-   support act announced "on all dates" isn't proof for each date, so a show
-   that isn't done gets its own search and Gemini call (at most 4 per tour).
-5. Shows by the same artist that the pages list but the ledger lacks
-   (`other_shows`) are added when their quote is on a fetched page and names
-   the venue and the date, within the tour's dates ± 14 days, and the artist
-   has no show that date (or a day off in the same city). Claim key
-   `found:<artist>:<date>`, `extra.check` = `discovered`.
+   result), names the show (its venue, or its date and city; the date at a
+   residency), doesn't state another year or weekday, and contains every
+   opener. A support act announced "on all dates" isn't proof for each date,
+   so a show that isn't done gets its own search and Gemini call (at most 4
+   per tour).
+5. Festivals: Gemini says whether each show was a festival (setlist.fm often
+   lists a festival set as a one-act show). A festival, or more than 6
+   openers, is kept as a lineup, checked like any bill, with
+   `extra.festival` on its claims; that marks the show `is_festival` (as does a
+   Pollstar `isFestival` event, or 8+ acts), so it isn't exported as
+   opened-for, and it isn't asked again. How to use lineups is for later.
+6. Shows by the same artist that the pages list but the ledger lacks
+   (`other_shows`) are added when their quote is on a fetched page, names the
+   venue and the date, and pins the year down (states it, or the right
+   weekday: tour listings often omit the year, and the same listing would
+   otherwise be filed under every year the artist toured then); the artist is
+   named in the quote or at the top of the page; within the tour's dates ± 14
+   days; and the artist has no show that date (or a day off in the same city).
+   Claim key `found:<artist>:<date>`, `extra.check` = `discovered`.
 
 | Check | Confidence | × weight 0.6 | Exported at the default 0.4? |
 |---|---|---|---|
@@ -224,6 +226,7 @@ sent.
   credits need ~300–350 Gemini calls, so a month's credits fit in one day.
 - A per-minute 429 from either waits (`Retry-After` / `retryDelay`, else 60 s)
   and retries, 3 times at most; then the run ends. The shows stay due.
+  "Overloaded" (HTTP 500/502/503/504) waits 30 s and retries, 3 times at most.
 - 1,000 credits take ~2–3 hours (searches, page fetches and Gemini calls).
 - `concertdb gemini` is its own process with its own lock
   (`ledger.gemini.lock`), next to `run` and `pollstar`; it commits before every

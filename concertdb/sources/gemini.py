@@ -87,7 +87,10 @@ EXCERPT_WIDTH = 350         # page text kept on each side of a venue/city/date m
 MAX_PAGE_CHARS = 6000       # excerpt text per page in a prompt
 MAX_PROMPT_CHARS = 60000
 DISCOVER_DAYS = 14
-PROMPT_VERSION = 2
+PROMPT_VERSION = 3
+MAX_OPENERS = 6             # more support acts than this is a festival lineup, not one bill
+TRANSIENT = (500, 502, 503, 504)   # "overloaded": waited out like a per-minute 429
+TRANSIENT_WAIT = 30
 NOT_FOUND_MIN_DAYS = 90
 NOT_FOUND_MAX_DAYS = 365
 DONE_DAYS = 10 * 365
@@ -122,6 +125,7 @@ def date_forms(day: str, numeric: bool = False) -> list[str]:
     d = date.fromisoformat(day)
     mon, n = MONTHS[d.month - 1], str(d.day)
     forms = [f"{mon} {n}", f"{n} {mon}", f"{mon[:3]} {n}", f"{n} {mon[:3]}",
+             *([f"sept {n}", f"{n} sept"] if d.month == 9 else []),
              f"{mon} {n}th", f"{n}th {mon}", f"{mon} {n}st", f"{n}st {mon}",
              f"{mon} {n}nd", f"{n}nd {mon}", f"{mon} {n}rd", f"{n}rd {mon}"]
     if numeric:
@@ -131,6 +135,27 @@ def date_forms(day: str, numeric: bool = False) -> list[str]:
 
 def venue_core(venue: str) -> str:
     return norm(venue)          # norm() already drops a leading "The"
+
+
+ARTICLES = {"le", "la", "les", "l", "el", "los", "las", "il", "de", "het", "die", "der"}
+GENERIC = {"ballroom", "theatre", "theater", "hall", "club", "bar", "music", "room", "lounge",
+           "cafe", "venue", "arena", "amphitheatre", "amphitheater", "center", "centre", "live"}
+
+
+def venue_keys(venue: str) -> list[str]:
+    """How a quote may name a venue: 'Le Transbordeur' -> 'transbordeur',
+    'Teragram Ballroom' -> 'teragram' (trailing generic words off, if what's left
+    is still a name)."""
+    words = venue_core(venue).split()
+    keys = [" ".join(words)]
+    while words and words[0] in ARTICLES and len(words) > 1:
+        words = words[1:]
+    keys.append(" ".join(words))
+    while len(words) > 1 and words[-1] in GENERIC:
+        words = words[:-1]
+    if len(" ".join(words)) >= 4:
+        keys.append(" ".join(words))
+    return list(dict.fromkeys(k for k in keys if k))
 
 
 def show_keys(show: dict, numeric: bool = False, city: bool = True) -> list[str]:
@@ -179,13 +204,65 @@ def names_show(words: str, show: dict) -> bool:
     return any(f" {k} " in words for k in show_keys(show, city=False))
 
 
+WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+_WEEKDAY_WORDS = {w: i for i, d in enumerate(WEEKDAYS) for w in (d, d[:3])}
+_WEEKDAY_WORDS.update({"tues": 1, "weds": 2, "thur": 3, "thurs": 3})
+
+
+def quote_years(quote: str) -> set[int]:
+    """Years a quote states: 2019, or the year of 9/17/19, 17.09.2019."""
+    years = {int(y) for y in re.findall(r"(?<!\d)(19[5-9]\d|20[0-4]\d)(?!\d)", quote or "")}
+    for y in re.findall(r"(?<!\d)\d{1,2}[/.]\d{1,2}[/.](\d{2}|\d{4})(?!\d)", quote or ""):
+        years.add(int(y) if len(y) == 4 else 2000 + int(y))
+    return years
+
+
+def quote_weekdays(quote: str, acts=()) -> set[int]:
+    """Weekdays a quote names, not counting act names (a band called Wednesday)."""
+    q = _padded(quote)
+    for a in acts:
+        if norm(a):
+            q = q.replace(f" {norm(a)} ", " ")
+    return {_WEEKDAY_WORDS[w] for w in q.split() if w in _WEEKDAY_WORDS}
+
+
+def date_contradicted(quote: str, day: str, acts=()) -> bool:
+    """The quote states another year, or another weekday, than this date."""
+    d = date.fromisoformat(day)
+    years, weekdays = quote_years(quote), quote_weekdays(quote, acts)
+    return bool(years and d.year not in years) or bool(weekdays and d.weekday() not in weekdays)
+
+
+def date_confirmed(quote: str, day: str, acts=()) -> bool:
+    """The quote pins the year down: it states it, or names the right weekday (a
+    listing without either may be from any year's tour)."""
+    d = date.fromisoformat(day)
+    return not date_contradicted(quote, day, acts) and (
+        d.year in quote_years(quote) or d.weekday() in quote_weekdays(quote, acts))
+
+
+def names_this_show(quote: str, show: dict, acts=()) -> bool:
+    """A show-specific quote: it names the venue, or the date with the city or the
+    year/weekday (the date alone at a residency), and doesn't state another year
+    or weekday."""
+    if not quote or date_contradicted(quote, show["date"], acts):
+        return False
+    q = _padded(quote)
+    has = lambda keys: any(f" {k} " in q for k in keys if k)     # noqa: E731
+    on_date = has([norm(f) for f in date_forms(show["date"], numeric=True)])
+    if show.get("need_date"):
+        return on_date
+    return has(venue_keys(show["venue"])) or (on_date and (
+        has([norm(show.get("city"))]) or date_confirmed(quote, show["date"], acts)))
+
+
 # ---------------------------------------------------------------- prompt / answer
 
 ANSWER_SHAPE = (
-    '{"shows": [{"date": "YYYY-MM-DD", "headliner": str|null, "openers": [str], '
+    '{"shows": [{"date": "YYYY-MM-DD", "festival": bool, "headliner": str|null, "openers": [str], '
     '"show_specific_quote": str|null, "url": str|null}], '
-    '"other_shows": [{"date": "YYYY-MM-DD", "venue": str, "city": str|null, "country": str|null, '
-    '"headliner": str|null, "openers": [str], "quote": str, "url": str}]}'
+    '"other_shows": [{"date": "YYYY-MM-DD", "festival": bool, "venue": str, "city": str|null, '
+    '"country": str|null, "headliner": str|null, "openers": [str], "quote": str, "url": str}]}'
 )
 
 
@@ -200,6 +277,8 @@ def build_prompt(artist: str, shows: list[dict], pages: list[dict], snippets: li
         f"other_shows: shows by {artist} that the text lists but that are NOT in the list below, each "
         "with a quote copied exactly from the text that names its date and venue (the venue's own name, "
         "not just the city; leave out shows whose venue isn't given). Leave it empty if none.",
+        "festival: true if the show was a festival or multi-stage event (a lineup, not one bill); then "
+        "headliner is its top-billed act and openers the rest of the lineup in billing order.",
         "Don't guess: an empty openers list is fine. Don't include the headliner among the openers.",
         "", "SHOWS:",
     ]
@@ -255,6 +334,7 @@ def parse_answer(text: str) -> dict | None:
         if isinstance(s, dict) and _str(s.get("date")):
             shows[s["date"].strip()] = {
                 "headliner": _str(s.get("headliner")), "openers": _names(s.get("openers")),
+                "festival": s.get("festival") is True,
                 "quote": _str(s.get("show_specific_quote")), "url": _str(s.get("url"))}
     others = []
     for s in obj.get("other_shows") or [] if isinstance(obj.get("other_shows"), list) else []:
@@ -262,7 +342,8 @@ def parse_answer(text: str) -> dict | None:
             others.append({
                 "date": s["date"].strip(), "venue": s["venue"].strip(), "city": _str(s.get("city")),
                 "country": _str(s.get("country")), "headliner": _str(s.get("headliner")),
-                "openers": _names(s.get("openers")), "quote": s["quote"].strip(), "url": _str(s.get("url"))})
+                "openers": _names(s.get("openers")), "festival": s.get("festival") is True,
+                "quote": s["quote"].strip(), "url": _str(s.get("url"))})
     return {"shows": shows, "other_shows": others}
 
 
@@ -467,7 +548,7 @@ class Run:
         self.model = client.model or MODEL
         self.stats = {"model": self.model, "tours": 0, "shows": 0, "searches": 0, "credits": 0,
                       "pages": 0, "gemini_calls": 0, "tokens": 0, "specific": 0, "page_only": 0,
-                      "not_found": 0, "discovered": 0, "skipped": 0, "errors": 0, "stopped": None}
+                      "not_found": 0, "festival": 0, "discovered": 0, "skipped": 0, "errors": 0, "stopped": None}
         self.pages: dict[str, dict] = {}      # url -> {"url", "text", "words"}; fetched once per run
         self.sleep = time.sleep
 
@@ -489,9 +570,13 @@ class Run:
 
     # requests
     def call(self, send, name: str):
-        """send(), waiting out per-minute 429s; Stop when a quota is spent."""
+        """send(), waiting out per-minute 429s and "overloaded" 5xx; Stop when a quota is spent."""
         for attempt in range(RETRIES_429 + 1):
             resp = send()
+            if resp.status in TRANSIENT and attempt < RETRIES_429:
+                self.log(f"  {name.lower()}: HTTP {resp.status}, waiting {TRANSIENT_WAIT}s")
+                self.sleep(TRANSIENT_WAIT)
+                continue
             if resp.status != 429:
                 return resp
             wait = retry_wait(resp)
@@ -577,7 +662,8 @@ class Run:
 
         fallbacks = 0
         for s in tour:
-            if results[s["id"]]["specific"] or len(tour) == 1 or fallbacks >= MAX_FALLBACKS:
+            if results[s["id"]]["specific"] or results[s["id"]]["festival"] or len(tour) == 1 \
+                    or fallbacks >= MAX_FALLBACKS:
                 continue
             if not self.can_afford(1):
                 break
@@ -595,7 +681,7 @@ class Run:
             all_texts += stexts
             urls += [x["url"] for x in new]
             r = self.judge(s, a["shows"].get(s["date"]), stexts + texts)
-            if r["specific"] or (not results[s["id"]]["acts"] and r["acts"]):
+            if r["specific"] or r["festival"] or (not results[s["id"]]["acts"] and r["acts"]):
                 results[s["id"]] = r
             others += a["other_shows"]
 
@@ -607,7 +693,7 @@ class Run:
 
     def judge(self, show: dict, ans: dict | None, texts: list[dict]) -> dict:
         """Which acts of an answer hold up against the texts, and how firmly."""
-        out = {"specific": False, "acts": [], "quote": None, "url": None, "dropped": []}
+        out = {"specific": False, "acts": [], "quote": None, "url": None, "dropped": [], "festival": False}
         if not ans or not ans["openers"]:
             return out
         headliner = ans["headliner"] or show["lead"]
@@ -615,9 +701,7 @@ class Run:
                                              if norm(o) != norm(headliner)]
         src = quote_source(ans["quote"], texts)
         qwords = _padded(ans["quote"] or "")
-        keys = [norm(f) for f in date_forms(show["date"], numeric=True)] if show.get("need_date") \
-            else show_keys(show, numeric=True)
-        specific = bool(src) and any(f" {k} " in qwords for k in keys) \
+        specific = bool(src) and names_this_show(ans["quote"], show, [n for n, _ in acts]) \
             and all(mentions(qwords, o) for o, role in acts if role == "opener")
         show_pages = [t for t in texts if names_show(t["words"], show)]
         for pos, (name, role) in enumerate(acts):
@@ -632,6 +716,7 @@ class Run:
         if not any(role == "opener" for _, role, *_ in out["acts"]):
             out["acts"] = []
         out["specific"] = specific
+        out["festival"] = ans["festival"] or len(ans["openers"]) > MAX_OPENERS
         out["quote"] = ans["quote"] if specific else None
         out["url"] = src["url"] if specific else None
         return out
@@ -650,12 +735,16 @@ class Run:
         for name, role, pos, check, url in r["acts"]:
             conf = CONF_SPECIFIC if check == "specific" else CONF_PAGE
             extra = {"model": self.model, "prompt_version": PROMPT_VERSION, "check": check,
+                     **({"festival": True} if r["festival"] else {}),
                      **({"quote": r["quote"][:500]} if check == "specific" and r["quote"] else {})}
             aid = show["lead_id"] if norm(name) == norm(show["lead"]) else ledger.get_or_create_artist(self.conn, name)
             ledger.add_claim(self.conn, show["id"], aid, SOURCE, key, role=role, confidence=conf,
                              position=pos, url=url, extra=extra, resolve=False)
-        ledger.resolve_show(self.conn, show["id"])
-        if r["specific"]:
+        ledger.resolve_show(self.conn, show["id"])     # a festival flag on a claim marks the show
+        if r["festival"]:   # a lineup: kept as a data point, not an opened-for; not asked again
+            state.postpone(self.conn, SOURCE, key, DONE_DAYS)
+            self.stats["festival"] += 1
+        elif r["specific"]:
             state.postpone(self.conn, SOURCE, key, DONE_DAYS)
             self.stats["specific"] += 1
         else:   # tour-wide evidence only: kept, and asked again later
@@ -689,7 +778,13 @@ class Run:
                     f" {k} " in qwords for k in show_keys(cand, numeric=True, city=False) if k != norm(o["venue"])):
                 self.log(f"    other show {o['date']} {o['venue']}: quote not verified, skipped")
                 continue
-            if not (mentions(src["words"], artist) or mentions(qwords, artist)):
+            if not date_confirmed(o["quote"], o["date"], [artist, o["headliner"] or ""] + o["openers"]):
+                # A listing without the year (or weekday) may be any year's tour.
+                self.log(f"    other show {o['date']} {o['venue']}: year not in the quote, skipped")
+                continue
+            # The artist named in the quote, or at the top of the page (a tour page's title).
+            if not (mentions(qwords, artist) or mentions(_padded(src.get("text", "")[:300]), artist)
+                    or ("text" not in src and mentions(src["words"], artist))):
                 continue
             # Known already: the artist on that date anywhere, or a day off in the same city
             # (some sources date a late show to the next day).
@@ -718,7 +813,9 @@ class Run:
                                  confidence=CONF_SPECIFIC if in_quote else CONF_PAGE,
                                  position=pos if role != "unknown" else None, url=src["url"],
                                  extra={"model": self.model, "prompt_version": PROMPT_VERSION,
-                                        "check": "discovered", "quote": o["quote"][:500]},
+                                        "check": "discovered", "quote": o["quote"][:500],
+                                        **({"festival": True} if o["festival"] or len(o["openers"]) > MAX_OPENERS
+                                           else {})},
                                  resolve=False)
                 stored.append(f"{name} ({role})")
             ledger.resolve_show(self.conn, show_id)
