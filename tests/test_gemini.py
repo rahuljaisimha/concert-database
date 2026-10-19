@@ -519,41 +519,6 @@ def test_overloaded_gemini_is_waited_out(conn, monkeypatch):
     assert waits == [gemini.TRANSIENT_WAIT] and stats["specific"] == 3 and stats["errors"] == 0
 
 
-def test_recheck_deletes_what_the_rules_now_reject(conn):
-    def claims(show, native, acts, check, quote):
-        for pos, (name, role) in enumerate(acts):
-            aid = TY if name == "Ty Segall" else ledger.get_or_create_artist(conn, name)
-            ledger.add_claim(conn, show, aid, "gemini", native, role=role, confidence=0.8, position=pos,
-                             extra={"prompt_version": 2, "check": check, "quote": quote})
-
-    good = ty_show(conn, "2026-02-27", "Princess Theatre", "Brisbane")
-    claims(good, f"show:{good}", [("Ty Segall", "headliner"), ("Knee", "opener")], "specific",
-           "FRI 27 FEB – PRINCESS THEATRE, BRISBANE w/ Earth Tongue, Knee")
-    wrong = ty_show(conn, "2024-10-28", "Exit/In", "Nashville")
-    claims(wrong, f"show:{wrong}", [("Ty Segall", "headliner"), ("Traps PS", "opener")], "specific",
-           "10/28/26 @ Variety Playhouse Atlanta, Georgia w/ Traps PS")
-    fest = ty_show(conn, "2017-06-03", "Victoria Park", "London")
-    claims(fest, f"show:{fest}", [("Ty Segall", "headliner")] + [(f"Band {i}", "opener") for i in range(8)],
-           "page", None)
-    v = ledger.get_or_create_venue(conn, "New Century", "Manchester")
-    undated = ledger.find_or_create_show(conn, "2024-06-09", v, {TY}, "gemini", f"found:{TY}:2024-06-09")
-    claims(undated, f"found:{TY}:2024-06-09", [("Ty Segall", "headliner")], "discovered",
-           "June 9 – New Century – Manchester")
-    conn.commit()
-
-    assert gemini.recheck(conn, dry_run=True, log=lambda *_: None)["discovered_dropped"] == 1
-    assert conn.execute("SELECT 1 FROM shows WHERE id = ?", (undated,)).fetchone()     # dry run: kept
-    stats = gemini.recheck(conn, log=lambda *_: None)
-    assert (stats["festival_shows"], stats["unspecific_shows"], stats["discovered_dropped"],
-            stats["shows_deleted"]) == (1, 1, 1, 1)
-    assert set(billing(conn, good)) == {"Ty Segall", "Knee"}
-    assert set(billing(conn, wrong)) == {"Ty Segall"} and len(billing(conn, fest)) == 9      # lineup kept
-    assert conn.execute("SELECT is_festival FROM shows WHERE id = ?", (fest,)).fetchone()[0] == 1
-    assert not conn.execute("SELECT 1 FROM shows WHERE id = ?", (undated,)).fetchone()
-    assert state.get(conn, "gemini", f"show:{fest}")["interval_days"] == gemini.DONE_DAYS
-    assert gemini.queue_shows(conn) >= 1 and state.get(conn, "gemini", f"show:{wrong}")   # asked again
-
-
 def test_a_band_named_after_a_weekday_is_not_a_date():
     show = {"date": "2024-10-28", "venue": "Exit/In", "city": "Nashville"}
     assert gemini.names_this_show("Exit/In w/ Wednesday", show, ["Wednesday"])

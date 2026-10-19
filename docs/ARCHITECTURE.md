@@ -28,12 +28,6 @@ to (an event from Pollstar or a venue page, one setlist from setlist.fm):
   manual entries), and never two different setlists by the same act (a
   residency's nights), even on the same date.
 
-Until October 2026 any two records a day apart were merged, which joined
-consecutive nights into one bill (and invented openers between them).
-`concertdb repair-shows` splits shows stored that way, using each record's
-own date (kept in the claim since then, or read back from the raw archive).
-It is safe to run again; `--dry-run` reports without saving.
-
 Sources only ever add claims. `ledger.resolve_show()` turns claims into
 billings: each source's vote is weighted (`SOURCE_WEIGHTS`: manual 1.0,
 schema.org 0.9, setlist.fm 0.8, Gemini/LLM 0.6), agreeing sources raise confidence
@@ -82,8 +76,7 @@ source, and claims keep their own event date. So it is kept short:
   `CONCERTDB_RAW_KEEP_DAYS`, 0 = keep everything) and in R2 (a lifecycle
   rule deletes `raw/` objects after 30 days; see docs/HOSTING.md).
 - **Pollstar event lists** are archived only when they changed; an unchanged
-  recheck stores nothing. Venue lookups (autocomplete) are always archived;
-  `pollstar-rematch` uses them.
+  recheck stores nothing. Venue lookups (autocomplete) are always archived.
 - **Pages fetched for Gemini are not archived.** A `specific` claim keeps its
   quote (`extra.quote`). Search results and Gemini's answers are archived
   (`data/raw/firecrawl/`, `data/raw/gemini/`).
@@ -153,9 +146,7 @@ about, on a schedule, with tight limits:
 - each venue's name is looked up once; the match (or the miss) is stored and
   not asked again (misses are retried after a year). Autocomplete names come
   HTML-escaped ("Stubb&#39;s", "Bar &amp; Grill") and are un-escaped before
-  matching (`normalize.norm` also un-escapes, for any source);
-  `concertdb pollstar-rematch` re-checks earlier misses against the archived
-  answers without new requests
+  matching (`normalize.norm` also un-escapes, for any source)
 - event lists are fetched 1,000 events a page (the website uses 50), so a
   venue's upcoming shows are almost always one request
 - event lists are rechecked every 3 days, backing off to 14 days when the
@@ -203,11 +194,6 @@ at a time:
    named in the quote or at the top of the page; within the tour's dates ± 14
    days; and the artist has no show that date (or a day off in the same city).
    Claim key `found:<artist>:<date>`, `extra.check` = `discovered`.
-
-`concertdb gemini-recheck [--dry-run]` re-tests stored claims against these
-rules, from the quote each kept: quotes that fail are deleted (the show is
-asked again; a discovered show is deleted if nothing else claims it), and
-lineups of more than 6 openers are flagged as festivals.
 
 | Check | Confidence | × weight 0.6 | Exported at the default 0.4? |
 |---|---|---|---|
