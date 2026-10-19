@@ -19,14 +19,15 @@ WHERE o.role = 'opener'
   AND s.is_festival = 0
   AND s.status NOT IN ('cancelled', 'postponed')
   AND o.confidence >= :min_conf AND h.confidence >= :min_conf
-  AND (:graph_only = 0 OR (oa.in_graph = 1 AND ha.in_graph = 1))
+  AND (:known_only = 0 OR (oa.mbid IS NOT NULL AND ha.mbid IS NOT NULL))
 GROUP BY o.artist_id, h.artist_id
 ORDER BY shows DESC, opener_name
 """
 
 
-def opened_for(conn: sqlite3.Connection, min_conf: float = 0.4, graph_only: bool = False) -> list[sqlite3.Row]:
-    return conn.execute(QUERY, {"min_conf": min_conf, "graph_only": int(graph_only)}).fetchall()
+def opened_for(conn: sqlite3.Connection, min_conf: float = 0.4, known_only: bool = False) -> list[sqlite3.Row]:
+    """known_only: both acts are MusicBrainz artists (not unmatched 'name:' ones)."""
+    return conn.execute(QUERY, {"min_conf": min_conf, "known_only": int(known_only)}).fetchall()
 
 
 def write_csv(rows: list[sqlite3.Row], path: str | Path) -> None:

@@ -7,7 +7,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from . import backup, db, export, ledger, seed, smoke, state, status
+from . import backup, db, export, ledger, musicbrainz, seed, smoke, state, status
 from .http import Fetcher
 from .normalize import norm
 from .sources import gemini, jsonld, pollstar, setlistfm
@@ -70,10 +70,11 @@ def _print_show(conn, show_id):
         " WHERE s.id = ?", (show_id,)).fetchone()
     print(f"{s['date']}  {s['venue']}, {s['city'] or '?'}  [{s['status']}]")
     for b in conn.execute(
-        "SELECT a.name, a.in_graph, b.role, b.confidence, b.n_sources FROM billings b"
+        "SELECT a.name, a.mbid, a.disambiguation, b.role, b.confidence, b.n_sources FROM billings b"
         " JOIN artists a ON a.id = b.artist_id WHERE b.show_id = ?"
         " ORDER BY b.role = 'opener', b.position", (show_id,)):
-        mark = "" if b["in_graph"] else "  (not in graph)"
+        mark = (f"  ({b['disambiguation']})" if b["disambiguation"] else "") if b["mbid"] \
+            else "  (not matched to MusicBrainz)"
         print(f"   {b['role']:<9} {b['name']}  conf {b['confidence']:.2f}, {b['n_sources']} source(s){mark}")
 
 
@@ -141,9 +142,13 @@ def _gemini_client(args):
     return gemini.client_from_env(_data_dir(args), model=args.model)
 
 
+def cmd_mb_load(args):
+    print(musicbrainz.load(_conn(args), args.db, args.dump))
+
+
 def cmd_gemini_eval(args):
     from . import gemini_eval
-    print(gemini_eval.run(_data_dir(args), args.case or None))
+    print(gemini_eval.run(_data_dir(args), args.case or None, everything=args.all))
 
 
 def _monthly_credits() -> int | None:
@@ -193,7 +198,7 @@ def cmd_status(args):
 
 
 def cmd_export(args):
-    rows = export.opened_for(_conn(args), min_conf=args.min_conf, graph_only=args.graph_only)
+    rows = export.opened_for(_conn(args), min_conf=args.min_conf, known_only=args.musicbrainz_only)
     export.write_csv(rows, args.out)
     print(f"wrote {len(rows):,} opened_for edges to {args.out}")
 
@@ -212,6 +217,7 @@ def cmd_backup(args, conn=None):
 
 def cmd_restore(args):
     backup.restore(Path(args.db), _data_dir(args))
+    print("restored; run `concertdb mb-load` to rebuild data/musicbrainz.sqlite (not backed up)")
 
 
 def cmd_smoke_test(args):
@@ -311,9 +317,15 @@ def build_parser() -> argparse.ArgumentParser:
                         f" (default: $GEMINI_MAX_ACTS, else {gemini.MAX_ACTS})")
     s.set_defaults(fn=cmd_gemini, locked="gemini")
 
+    s = sub.add_parser("mb-load", help="build data/musicbrainz.sqlite (every artist's names, aliases and"
+                       " disambiguation note) from MusicBrainz's data dump, streamed (~500 MB read)")
+    s.add_argument("--dump", help="URL or path of mbdump.tar.bz2 (default: the latest full export)")
+    s.set_defaults(fn=cmd_mb_load)
+
     s = sub.add_parser("gemini-eval", help="run the search + Gemini step on shows whose bills we know"
                        " (concertdb/gemini_cases.json) in a throwaway database, and score it")
     s.add_argument("--case", action="append", help="only this case (repeatable)")
+    s.add_argument("--all", action="store_true", help="every case, not just the default two (costs more)")
     s.set_defaults(fn=cmd_gemini_eval)
 
     s = sub.add_parser("run", help="one scheduled cycle: watched pages, setlist.fm, Pollstar, backup")
@@ -331,7 +343,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("export", help="write opened_for edges for MusicSceneMap")
     s.add_argument("--out", default="data/export/opened_for.csv")
     s.add_argument("--min-conf", type=float, default=0.4)
-    s.add_argument("--graph-only", action="store_true", help="only artists in the MusicSceneMap graph")
+    s.add_argument("--musicbrainz-only", action="store_true",
+                   help="only acts matched to MusicBrainz (no unmatched 'name:' artists)")
     s.set_defaults(fn=cmd_export)
 
     s = sub.add_parser("smoke-test", help="a few live requests per source into a throwaway database")

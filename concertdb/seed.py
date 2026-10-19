@@ -1,7 +1,12 @@
-"""Import the artist universe from MusicSceneMap's graph.db(.gz).
+"""The initial artist list, from MusicSceneMap's graph.db(.gz): a one-time input.
 
-Every person/group node becomes an artist (in_graph = 1) and a setlist.fm unit
-of work. Groups are crawled before people, and better-connected artists first.
+Every person/group node becomes an artist (in_graph = 1, kept only as a record
+of where it came from) and a setlist.fm unit of work. Groups are crawled before
+people, and better-connected artists first. Nothing reads the graph after this:
+names are matched against MusicBrainz (concertdb/musicbrainz.py), and new
+artists are queued for setlist.fm only through `concertdb prioritize`. The
+graph is built from this ledger's export, so re-seeding from it would be a
+circular dependency.
 """
 
 import gzip

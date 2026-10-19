@@ -78,7 +78,8 @@ Windows Task Scheduler.
    ```
 3. Load the artists and test one cycle by hand:
    ```bash
-   .venv/bin/concertdb seed          # downloads MusicSceneMap's graph.db.gz
+   .venv/bin/concertdb seed          # downloads MusicSceneMap's graph.db.gz (one time)
+   .venv/bin/concertdb mb-load       # MusicBrainz names for matching (~1.5 min; README "MusicBrainz data")
    .venv/bin/concertdb prioritize "Osees" "Flat Worms"
    deploy/run.sh && tail -30 data/run.log
    ```
@@ -114,7 +115,8 @@ Secrets live only in `.env` on the machine that runs the crawler:
 - `chmod 600 .env` so only your user can read it.
 - The R2 backups contain the database and raw responses, never `.env`.
 - Keep a copy of the `.env` values in a password manager: if the machine
-  dies, `concertdb restore` brings back the data but not the secrets.
+  dies, `concertdb restore` brings back the data but not the secrets (or
+  `data/musicbrainz.sqlite`: run `concertdb mb-load` after restoring).
 - If a key leaks, regenerate it at the provider and update `.env`.
 
 ## R2 bucket

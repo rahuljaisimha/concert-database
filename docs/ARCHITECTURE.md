@@ -3,7 +3,8 @@
 ## Data model (`concertdb/db.py`)
 
 ```
-artists   id = MusicBrainz ID, or 'name:<normalized>' when not matched to the graph
+artists   id = MusicBrainz ID, or 'name:<normalized>' when not matched to MusicBrainz;
+          + MusicBrainz's disambiguation note
 venues    + venue_source_ids (each source's own venue id → our venue)
 shows     one per venue per night (see "Which records are the same show")
 claims    what ONE source says about ONE artist at ONE show:
@@ -12,7 +13,37 @@ billings  the resolved bill, recomputed from all claims for a show
 crawl_state  one row per unit of work: next_due, adaptive interval, cursor, etag, hash
 usage     requests and $ per source per day (budgets, caps; Gemini's day is
           Pacific time, when its free quota resets)
+mb.*      data/musicbrainz.sqlite, attached: every MusicBrainz artist and its
+          names (see "Matching names"); derived, not backed up
 ```
+
+### Matching names
+
+setlist.fm sends MusicBrainz IDs; Pollstar, Gemini and pages send only names.
+Names are matched against MusicBrainz itself, not the MusicSceneMap graph:
+the graph is only the one-time seed of the artist list (`concertdb seed`), and
+it is built from this ledger's export, so matching against it would be
+circular.
+
+`concertdb mb-load` builds `data/musicbrainz.sqlite` from MusicBrainz's full
+data export (`mbdump.tar.bz2`, ~7 GB, read as a stream: the `artist` and
+`artist_alias` tables come first, so it reads ~500 MB and stops): every
+artist's MBID, name, disambiguation note ("US garage rock band") and type,
+and each artist's name and aliases, normalized. Sort names ("Cooper, Alan")
+are left out: they collide with other artists' real names. It sits next to
+the ledger, is attached to every connection as `mb`, and isn't backed up
+(rebuilt in a few minutes; run it again now and then to refresh).
+
+A name with no MBID resolves to:
+1. the one MusicBrainz artist with that name or alias ("Thee Oh Sees" →
+   Osees), added to the ledger with its MusicBrainz name and disambiguation
+   note if it isn't there yet (not queued for setlist.fm: that's
+   `concertdb prioritize`);
+2. if several MusicBrainz artists have it ("Camille", "Nirvana"), the one
+   already in the ledger, if exactly one is;
+3. otherwise an unmatched `name:` artist, so the fact is still recorded.
+   Telling homonyms apart by where the show was (MusicBrainz's area) is a
+   possible next step.
 
 ### Which records are the same show
 
@@ -265,12 +296,16 @@ sent.
   page text is not.
 
 Known cases: `concertdb/gemini_cases.json` lists shows whose bills we know (Ty
-Segall's Australian tour, Iguana Death Cult at Zebulon, Osees at Club Soda,
-Ferris Wheelers and Le Transbordeur, FYF 2017 as a festival).
-`concertdb gemini-eval [--case NAME]` runs the step on them for real in a
-throwaway database (`data/eval/`, ~10 Gemini calls) and scores what it found;
-`tests/test_gemini.py` replays the Ty Segall case offline from captured search
-answers and the promoter's tour page.
+Segall's Australian tour and its Gold Coast show alone, Iguana Death Cult at
+Zebulon, Osees at Club Soda, Ferris Wheelers, Le Transbordeur and the Teragram
+billed as Thee Oh Sees with Fuzz, FYF 2017 as a festival).
+`concertdb gemini-eval` runs the step for real, in a throwaway database
+(`data/eval/`, matching names with `data/musicbrainz.sqlite`), on the two
+default cases (Ty Segall at Mo's Desert Clubhouse: Earth Tongue and Speeding
+Vehicle; Iguana Death Cult at Zebulon: Flat Worms, not on setlist.fm): ~2
+searches, 2 Gemini calls. `--case NAME` or `--all` for the rest (~10 Gemini
+calls, ~25 context.dev credits). `tests/test_gemini.py` replays the Ty Segall
+tour offline from captured search answers and the promoter's tour page.
 
 ## Roadmap
 

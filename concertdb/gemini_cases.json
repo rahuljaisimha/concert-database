@@ -1,48 +1,200 @@
 {
-  "_about": "Shows whose bills we know, used to check the search + Gemini step: offline in tests/test_gemini.py (ty-segall-au-2026, with captured pages) and live with `concertdb gemini-eval`. openers: the support acts, any order. discover: shows the pages list that the ledger lacks. festival: the show is a festival set.",
+  "_about": "Shows whose bills we know, used to check the search + Gemini step: offline in tests/test_gemini.py (ty-segall-au-2026, with captured pages) and live with `concertdb gemini-eval` (the cases marked default; --case NAME or --all for the rest; each costs searches and Gemini calls). openers: the support acts, any order. discover: shows the pages list that the ledger lacks. festival: the show is a festival set.",
   "cases": [
     {
       "name": "ty-segall-au-2026",
-      "artist": "Ty Segall", "mbid": "07a17571-81fc-4cf8-a634-98f0d926d313", "country": "Australia",
+      "artist": "Ty Segall",
+      "mbid": "07a17571-81fc-4cf8-a634-98f0d926d313",
+      "country": "Australia",
       "note": "Mistletone's tour page names each date's support; Earth Tongue is on every date, so a tour-wide line isn't enough.",
       "shows": [
-        {"date": "2026-02-26", "venue": "Mo's Desert Clubhouse", "city": "Gold Coast", "openers": ["Earth Tongue", "Speeding Vehicle"]},
-        {"date": "2026-02-27", "venue": "Princess Theatre", "city": "Brisbane", "openers": ["Earth Tongue", "Knee"]},
-        {"date": "2026-03-02", "venue": "The Metro", "city": "Sydney", "openers": ["Earth Tongue", "R.M.F.C."]},
-        {"date": "2026-03-04", "venue": "The Croxton", "city": "Melbourne", "openers": ["Earth Tongue", "Dr Sure's Unusual Practice"]},
-        {"date": "2026-03-06", "venue": "Barwon Heads Hotel", "city": "Barwon Heads", "openers": ["Earth Tongue", "Dr Sure's Unusual Practice"]}
+        {
+          "date": "2026-02-26",
+          "venue": "Mo's Desert Clubhouse",
+          "city": "Gold Coast",
+          "openers": [
+            "Earth Tongue",
+            "Speeding Vehicle"
+          ]
+        },
+        {
+          "date": "2026-02-27",
+          "venue": "Princess Theatre",
+          "city": "Brisbane",
+          "openers": [
+            "Earth Tongue",
+            "Knee"
+          ]
+        },
+        {
+          "date": "2026-03-02",
+          "venue": "The Metro",
+          "city": "Sydney",
+          "openers": [
+            "Earth Tongue",
+            "R.M.F.C."
+          ]
+        },
+        {
+          "date": "2026-03-04",
+          "venue": "The Croxton",
+          "city": "Melbourne",
+          "openers": [
+            "Earth Tongue",
+            "Dr Sure's Unusual Practice"
+          ]
+        },
+        {
+          "date": "2026-03-06",
+          "venue": "Barwon Heads Hotel",
+          "city": "Barwon Heads",
+          "openers": [
+            "Earth Tongue",
+            "Dr Sure's Unusual Practice"
+          ]
+        }
       ],
       "discover": [
-        {"date": "2026-02-28", "venue": "A & I Hall", "city": "Bangalow", "openers": ["Earth Tongue", "Media Puzzle", "Love Banana", "Knee"]},
-        {"date": "2026-03-01", "venue": "Waves", "city": "Wollongong", "openers": ["Earth Tongue", "Straight Arrows"]}
+        {
+          "date": "2026-02-28",
+          "venue": "A & I Hall",
+          "city": "Bangalow",
+          "openers": [
+            "Earth Tongue",
+            "Media Puzzle",
+            "Love Banana",
+            "Knee"
+          ]
+        },
+        {
+          "date": "2026-03-01",
+          "venue": "Waves",
+          "city": "Wollongong",
+          "openers": [
+            "Earth Tongue",
+            "Straight Arrows"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ty-segall-gold-coast",
+      "default": true,
+      "artist": "Ty Segall",
+      "mbid": "07a17571-81fc-4cf8-a634-98f0d926d313",
+      "country": "Australia",
+      "note": "One show of the tour above, on its own: one search, one Gemini call.",
+      "shows": [
+        {
+          "date": "2026-02-26",
+          "venue": "Mo's Desert Clubhouse",
+          "city": "Gold Coast",
+          "openers": [
+            "Earth Tongue",
+            "Speeding Vehicle"
+          ]
+        }
       ]
     },
     {
       "name": "iguana-death-cult-zebulon",
-      "artist": "Iguana Death Cult", "country": "United States",
-      "shows": [{"date": "2026-09-17", "venue": "Zebulon", "city": "Los Angeles", "openers": ["Flat Worms"]}]
+      "artist": "Iguana Death Cult",
+      "country": "United States",
+      "shows": [
+        {
+          "date": "2026-09-17",
+          "venue": "Zebulon",
+          "city": "Los Angeles",
+          "openers": [
+            "Flat Worms"
+          ]
+        }
+      ],
+      "default": true,
+      "note": "Not on setlist.fm; Flat Worms' own post and the venue's listing name the bill."
     },
     {
       "name": "osees-club-soda",
-      "artist": "Osees", "mbid": "194272cc-dcc8-4640-a4a6-66da7d250d5c", "country": "Canada",
-      "shows": [{"date": "2023-06-25", "venue": "Club Soda", "city": "Montreal", "openers": ["Hot Garbage", "Tha Retail Simp$"]}]
+      "artist": "Osees",
+      "mbid": "194272cc-dcc8-4640-a4a6-66da7d250d5c",
+      "country": "Canada",
+      "shows": [
+        {
+          "date": "2023-06-25",
+          "venue": "Club Soda",
+          "city": "Montreal",
+          "openers": [
+            "Hot Garbage",
+            "Tha Retail Simp$"
+          ]
+        }
+      ]
     },
     {
       "name": "osees-ferris-wheelers",
-      "artist": "Osees", "mbid": "194272cc-dcc8-4640-a4a6-66da7d250d5c", "country": "United States",
-      "shows": [{"date": "2025-10-19", "venue": "Ferris Wheelers", "city": "Dallas", "openers": ["DMBQ"]}]
+      "artist": "Osees",
+      "mbid": "194272cc-dcc8-4640-a4a6-66da7d250d5c",
+      "country": "United States",
+      "shows": [
+        {
+          "date": "2025-10-19",
+          "venue": "Ferris Wheelers",
+          "city": "Dallas",
+          "openers": [
+            "DMBQ"
+          ]
+        }
+      ]
     },
     {
       "name": "osees-transbordeur",
-      "artist": "Osees", "mbid": "194272cc-dcc8-4640-a4a6-66da7d250d5c", "country": "France",
+      "artist": "Osees",
+      "mbid": "194272cc-dcc8-4640-a4a6-66da7d250d5c",
+      "country": "France",
       "note": "The venue page says 'au Transbordeur', not 'Le Transbordeur'.",
-      "shows": [{"date": "2022-07-03", "venue": "Le Transbordeur", "city": "Villeurbanne", "openers": ["Over-Gain Optimal Death"]}]
+      "shows": [
+        {
+          "date": "2022-07-03",
+          "venue": "Le Transbordeur",
+          "city": "Villeurbanne",
+          "openers": [
+            "Over-Gain Optimal Death"
+          ]
+        }
+      ]
     },
     {
       "name": "fyf-2017",
-      "artist": "Osees", "mbid": "194272cc-dcc8-4640-a4a6-66da7d250d5c", "country": "United States",
+      "artist": "Osees",
+      "mbid": "194272cc-dcc8-4640-a4a6-66da7d250d5c",
+      "country": "United States",
       "note": "FYF Fest; setlist.fm lists the set as a one-act show at Exposition Park.",
-      "shows": [{"date": "2017-07-21", "venue": "Exposition Park", "city": "Los Angeles", "festival": true}]
+      "shows": [
+        {
+          "date": "2017-07-21",
+          "venue": "Exposition Park",
+          "city": "Los Angeles",
+          "festival": true
+        }
+      ]
+    },
+    {
+      "name": "osees-teragram-2015",
+      "artist": "Osees",
+      "mbid": "194272cc-dcc8-4640-a4a6-66da7d250d5c",
+      "country": "United States",
+      "note": "Billed as Thee Oh Sees (an older name of Osees: must not become a second act), with Fuzz (a name several MusicBrainz artists share).",
+      "shows": [
+        {
+          "date": "2015-12-16",
+          "venue": "Teragram Ballroom",
+          "city": "Los Angeles",
+          "openers": [
+            "Fuzz",
+            "Wand"
+          ]
+        }
+      ]
     }
   ]
 }

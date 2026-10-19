@@ -9,6 +9,7 @@ import json
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 
+from .db import has_musicbrainz
 from .normalize import norm
 
 # How much each source's word counts when sources disagree.
@@ -37,26 +38,34 @@ def now_iso() -> str:
 def get_or_create_artist(conn: sqlite3.Connection, name: str, mbid: str | None = None) -> str:
     """Return the artist id for a name (and MBID if the source has one).
 
-    With an MBID the match is exact. Without one, a name that matches exactly
-    one artist in the graph resolves to it; otherwise an unresolved
-    'name:<norm>' artist is used so the fact is still recorded.
+    With an MBID the match is exact. Without one, the name is looked up among
+    every MusicBrainz artist's names and aliases (mb.names, from
+    concertdb/musicbrainz.py): exactly one artist with it -> that artist; several
+    -> the one already in the ledger, if exactly one is. Without the MusicBrainz
+    file, or with no MusicBrainz artist of that name, a ledger artist with an
+    MBID and that exact name counts if there is exactly one. Otherwise an
+    unresolved 'name:<norm>' artist is used so the fact is still recorded.
     """
     n = norm(name)
     if mbid:
         row = conn.execute("SELECT id FROM artists WHERE id = ?", (mbid,)).fetchone()
         if row:
             return row["id"]
-        conn.execute(
-            "INSERT INTO artists (id, name, name_norm, mbid) VALUES (?, ?, ?, ?)",
-            (mbid, name, n, mbid),
-        )
-        return mbid
+        return _add_mb_artist(conn, mbid, name)
 
-    rows = conn.execute(
-        "SELECT id FROM artists WHERE name_norm = ? AND in_graph = 1", (n,)
-    ).fetchall()
-    if len(rows) == 1:
-        return rows[0]["id"]
+    candidates = _mb_candidates(conn, n)
+    if len(candidates) == 1:
+        return _add_mb_artist(conn, candidates[0], name)
+    if len(candidates) > 1:
+        known = [c for c in candidates if conn.execute("SELECT 1 FROM artists WHERE id = ?", (c,)).fetchone()]
+        if len(known) == 1:
+            return known[0]
+    else:
+        rows = conn.execute(
+            "SELECT id FROM artists WHERE name_norm = ? AND mbid IS NOT NULL", (n,)
+        ).fetchall()
+        if len(rows) == 1:
+            return rows[0]["id"]
 
     aid = f"name:{n}"
     conn.execute(
@@ -64,6 +73,24 @@ def get_or_create_artist(conn: sqlite3.Connection, name: str, mbid: str | None =
         (aid, name, n),
     )
     return aid
+
+
+def _mb_candidates(conn: sqlite3.Connection, n: str) -> list[str]:
+    if not n or not has_musicbrainz(conn):
+        return []
+    return [r[0] for r in conn.execute("SELECT DISTINCT mbid FROM mb.names WHERE name_norm = ?", (n,))]
+
+
+def _add_mb_artist(conn: sqlite3.Connection, mbid: str, name: str) -> str:
+    """An artist by MBID, with MusicBrainz's name, type and disambiguation note when known."""
+    mb = conn.execute("SELECT name, type, comment FROM mb.artists WHERE mbid = ?", (mbid,)).fetchone() \
+        if has_musicbrainz(conn) else None
+    name = mb["name"] if mb else name
+    conn.execute(
+        "INSERT OR IGNORE INTO artists (id, name, name_norm, mbid, type, disambiguation) VALUES (?, ?, ?, ?, ?, ?)",
+        (mbid, name, norm(name), mbid, mb["type"] if mb else None, mb["comment"] if mb else None),
+    )
+    return mbid
 
 
 # ----------------------------------------------------------------- venues

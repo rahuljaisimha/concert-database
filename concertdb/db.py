@@ -28,8 +28,9 @@ CREATE TABLE IF NOT EXISTS artists (
     name_norm TEXT NOT NULL,
     mbid      TEXT,
     type      TEXT,                       -- person | group | NULL
-    in_graph  INTEGER NOT NULL DEFAULT 0 CHECK (in_graph IN (0, 1)),
-    degree    INTEGER NOT NULL DEFAULT 0  -- connections in the MusicSceneMap graph
+    in_graph  INTEGER NOT NULL DEFAULT 0 CHECK (in_graph IN (0, 1)),  -- came from the initial graph seed (history only)
+    degree    INTEGER NOT NULL DEFAULT 0, -- connections in the initial graph seed (crawl order)
+    disambiguation TEXT                   -- MusicBrainz's note ("US garage rock band")
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_artists_name_norm ON artists(name_norm);
 
@@ -141,12 +142,34 @@ def connect(path: str | Path) -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.execute(
         "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
         (str(SCHEMA_VERSION),),
     )
     conn.commit()
+    if str(path) != ":memory:":
+        mb = path.with_name("musicbrainz.sqlite")
+        if mb.exists():
+            attach_musicbrainz(conn, mb)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Columns added after a ledger was created."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(artists)")}
+    if "disambiguation" not in cols:
+        conn.execute("ALTER TABLE artists ADD COLUMN disambiguation TEXT")
+
+
+def attach_musicbrainz(conn: sqlite3.Connection, path) -> None:
+    """MusicBrainz's artists and names (concertdb/musicbrainz.py), as schema `mb`."""
+    if not any(r["name"] == "mb" for r in conn.execute("PRAGMA database_list")):
+        conn.execute("ATTACH DATABASE ? AS mb", (str(path),))
+
+
+def has_musicbrainz(conn: sqlite3.Connection) -> bool:
+    return any(r["name"] == "mb" for r in conn.execute("PRAGMA database_list"))
 
 
 def begin_write(conn: sqlite3.Connection) -> None:
