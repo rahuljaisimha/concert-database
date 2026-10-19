@@ -225,7 +225,8 @@ sent.
   costs 1 credit, plus 1 for highlights (the passages relevant to the query),
   so 2 (recorded from `key_metadata.credits_consumed`); full page text would
   be +1 per result, so it isn't asked for. 6.5 s apart (free plan: 10 a
-  minute). Pages are still fetched by us; one we can't fetch (Facebook event
+  minute), at most 1,500 credits a run (`CONTEXT_DEV_MAX_CREDITS`; a night's
+  run needs ~1,000–1,300), then the next search backend. Pages are still fetched by us; one we can't fetch (Facebook event
   pages) is read from its highlights. The archive keeps the answer without
   page text. Tried on the
   known cases: good for one-show searches (Facebook events "Osees w/ DMBQ",
