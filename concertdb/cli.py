@@ -168,6 +168,10 @@ def cmd_gemini(args):
                      max_acts=args.max_acts))
 
 
+def cmd_gemini_recheck(args):
+    print(gemini.recheck(_conn(args), dry_run=args.dry_run))
+
+
 def cmd_run(args):
     """One scheduled cycle: watched pages, setlist.fm, Pollstar, backup. Safe to run often.
 
@@ -334,6 +338,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="only ask about shows with at most this many acts listed"
                         f" (default: $GEMINI_MAX_ACTS, else {gemini.MAX_ACTS})")
     s.set_defaults(fn=cmd_gemini, locked="gemini")
+
+    s = sub.add_parser("gemini-recheck", help="re-test stored Gemini claims against the current rules"
+                       " (festival lineups, quotes that don't name the show, undated new shows) and delete"
+                       " what fails (no requests)")
+    s.add_argument("--dry-run", action="store_true", help="only list what would be deleted")
+    s.set_defaults(fn=cmd_gemini_recheck, locked="gemini")
 
     s = sub.add_parser("run", help="one scheduled cycle: watched pages, setlist.fm, Pollstar, backup")
     s.add_argument("--setlistfm-requests", type=int, default=setlistfm.DAILY_LIMIT)

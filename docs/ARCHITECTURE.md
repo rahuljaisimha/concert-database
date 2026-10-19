@@ -184,14 +184,27 @@ at a time:
    city and date goes into ONE Gemini call for the whole tour, which answers per
    show: headliner, openers, and a quote naming THIS show with its openers.
 4. A show is done only when that quote is on a fetched page (or a search
-   result), names the show (venue, city or date) and contains every opener. A
-   support act announced "on all dates" isn't proof for each date, so a show
-   that isn't done gets its own search and Gemini call (at most 4 per tour).
-5. Shows by the same artist that the pages list but the ledger lacks
-   (`other_shows`) are added when their quote is on a fetched page and names
-   the venue and the date, within the tour's dates ± 14 days, and the artist
-   has no show that date (or a day off in the same city). Claim key
-   `found:<artist>:<date>`, `extra.check` = `discovered`.
+   result), names the show (its venue, or its date and city; the date at a
+   residency), doesn't state another year or weekday, and contains every
+   opener. A support act announced "on all dates" isn't proof for each date,
+   so a show that isn't done gets its own search and Gemini call (at most 4
+   per tour).
+5. Festivals: Gemini says whether each show was a festival; a festival, or
+   more than 6 openers, stores nothing and isn't asked again (being on a
+   lineup isn't opening; setlist.fm often lists a festival set as a one-act
+   show).
+6. Shows by the same artist that the pages list but the ledger lacks
+   (`other_shows`) are added when their quote is on a fetched page, names the
+   venue and the date, and pins the year down (states it, or the right
+   weekday: tour listings often omit the year, and the same listing would
+   otherwise be filed under every year the artist toured then); the artist is
+   named in the quote or at the top of the page; within the tour's dates ± 14
+   days; and the artist has no show that date (or a day off in the same city).
+   Claim key `found:<artist>:<date>`, `extra.check` = `discovered`.
+
+`concertdb gemini-recheck [--dry-run]` re-tests stored claims against these
+rules, from the quote each kept, and deletes what fails (shows asked again or,
+for festivals, not; discovered shows deleted if nothing else claims them).
 
 | Check | Confidence | × weight 0.6 | Exported at the default 0.4? |
 |---|---|---|---|
@@ -224,6 +237,7 @@ sent.
   credits need ~300–350 Gemini calls, so a month's credits fit in one day.
 - A per-minute 429 from either waits (`Retry-After` / `retryDelay`, else 60 s)
   and retries, 3 times at most; then the run ends. The shows stay due.
+  "Overloaded" (HTTP 500/502/503/504) waits 30 s and retries, 3 times at most.
 - 1,000 credits take ~2–3 hours (searches, page fetches and Gemini calls).
 - `concertdb gemini` is its own process with its own lock
   (`ledger.gemini.lock`), next to `run` and `pollstar`; it commits before every

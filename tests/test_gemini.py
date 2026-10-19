@@ -451,3 +451,114 @@ def test_pages_are_not_archived_but_searches_and_answers_are(tmp_path):
     assert not (tmp_path / "raw" / gemini.PAGES).exists()
     archived = gzip.open(next((tmp_path / "raw" / gemini.SEARCH).glob("*.jsonl.gz")), "rt").read()
     assert "Ty Segall tour" in archived and "fc-key" not in archived
+
+
+# ------------------------------------------------------------------ quality rules
+
+def test_a_show_specific_quote_names_this_show():
+    exit_in = {"date": "2024-10-28", "venue": "Exit/In", "city": "Nashville"}
+    assert not gemini.names_this_show("10/28/26 @ Variety Playhouse Atlanta, Georgia w/ Traps PS", exit_in)
+    assert gemini.names_this_show("Osees at Exit/In w/ Traps PS", exit_in)
+    assert gemini.names_this_show("Mon Oct 28 - Nashville, TN w/ Traps PS", exit_in)          # date + city
+    assert not gemini.names_this_show("Nashville w/ Traps PS", exit_in)                       # city alone
+    assert not gemini.names_this_show("Oct 28, 2023 Exit/In w/ Traps PS", exit_in)           # another year
+    assert not gemini.names_this_show("Tue. Oct 28 - Exit/In w/ Traps PS", exit_in)          # another weekday
+    byron = {"date": "2016-01-10", "venue": "Great Northern Hotel", "city": "Byron Bay"}
+    assert not gemini.names_this_show("Throughout their 11 date tour (Byron Bay, Sydney, Melbourne)"
+                                      " they will play alongside Blank Realm", byron)
+
+
+def test_a_new_show_needs_its_year_pinned_down():
+    assert not gemini.date_confirmed("June 9 – New Century – Manchester", "2024-06-09")
+    assert not gemini.date_confirmed("Sun. October 18 – Cleveland, OH @ Beachland Ballroom", "2022-10-18")
+    assert gemini.date_confirmed("Sun. October 18 – Cleveland, OH @ Beachland Ballroom", "2020-10-18")
+    assert gemini.date_confirmed("May 28, 2018 The Earl · East Atlanta", "2018-05-28")
+    assert gemini.date_confirmed("by Old Psyche Man on 9/17/24 191 Toole - Tucson", "2024-09-17")
+    assert not gemini.date_confirmed("by Old Psyche Man on 9/17/24 191 Toole - Tucson", "2025-09-17")
+
+
+def test_festivals_store_nothing_and_are_not_asked_again(conn):
+    show = ty_show(conn, "2017-07-21", "Exposition Park", "Los Angeles")
+    lineup = {"shows": [{"date": "2017-07-21", "festival": True, "headliner": "Missy Elliott",
+                         "openers": ["Bjork", "Ty Segall"], "show_specific_quote": None, "url": None}]}
+    client = FakeClient([answer(lineup)], searches={"Exposition": web(("https://fyf.example", "FYF", ""))})
+    stats = gemini.ask(conn, client, **QUIET)
+    assert stats["festival"] == 1 and not conn.execute("SELECT 1 FROM claims WHERE source = 'gemini'").fetchone()
+    assert state.get(conn, "gemini", f"show:{show}")["interval_days"] == gemini.DONE_DAYS
+    many = {"date": "2017-07-21", "festival": False, "headliner": "X", "openers": list("ABCDEFG"),
+            "quote": None, "url": None}
+    assert gemini.Run(conn, client, 1, None, None, 1, print).judge(gemini._show(conn, show), many, [])["festival"]
+
+
+def test_undated_listings_are_not_added(conn):
+    ty_tour(conn)
+    client = ty_client()
+    a = json.loads(json.dumps(TOUR_ANSWER))
+    a["other_shows"][0]["quote"] = "28 FEB – DAZE AWAY @ A & I HALL, BANGALOW w/ Earth Tongue, Media Puzzle"
+    client.answers[0] = answer(a)
+    client.pages[TOUR_URL] = TOUR_PAGE.replace("SAT 28 FEB", "28 FEB")
+    assert gemini.ask(conn, client, **QUIET)["discovered"] == 0
+
+
+def test_overloaded_gemini_is_waited_out(conn, monkeypatch):
+    ty_tour(conn)
+    client = ty_client()
+    client.answers.insert(0, Response(503, "overloaded", None, None, None))
+    waits = []
+    monkeypatch.setattr(gemini.time, "sleep", waits.append)
+    stats = gemini.ask(conn, client, **QUIET)
+    assert waits == [gemini.TRANSIENT_WAIT] and stats["specific"] == 3 and stats["errors"] == 0
+
+
+def test_recheck_deletes_what_the_rules_now_reject(conn):
+    def claims(show, native, acts, check, quote):
+        for pos, (name, role) in enumerate(acts):
+            aid = TY if name == "Ty Segall" else ledger.get_or_create_artist(conn, name)
+            ledger.add_claim(conn, show, aid, "gemini", native, role=role, confidence=0.8, position=pos,
+                             extra={"prompt_version": 2, "check": check, "quote": quote})
+
+    good = ty_show(conn, "2026-02-27", "Princess Theatre", "Brisbane")
+    claims(good, f"show:{good}", [("Ty Segall", "headliner"), ("Knee", "opener")], "specific",
+           "FRI 27 FEB – PRINCESS THEATRE, BRISBANE w/ Earth Tongue, Knee")
+    wrong = ty_show(conn, "2024-10-28", "Exit/In", "Nashville")
+    claims(wrong, f"show:{wrong}", [("Ty Segall", "headliner"), ("Traps PS", "opener")], "specific",
+           "10/28/26 @ Variety Playhouse Atlanta, Georgia w/ Traps PS")
+    fest = ty_show(conn, "2017-06-03", "Victoria Park", "London")
+    claims(fest, f"show:{fest}", [("Ty Segall", "headliner")] + [(f"Band {i}", "opener") for i in range(8)],
+           "page", None)
+    v = ledger.get_or_create_venue(conn, "New Century", "Manchester")
+    undated = ledger.find_or_create_show(conn, "2024-06-09", v, {TY}, "gemini", f"found:{TY}:2024-06-09")
+    claims(undated, f"found:{TY}:2024-06-09", [("Ty Segall", "headliner")], "discovered",
+           "June 9 – New Century – Manchester")
+    conn.commit()
+
+    assert gemini.recheck(conn, dry_run=True, log=lambda *_: None)["discovered_dropped"] == 1
+    assert conn.execute("SELECT 1 FROM shows WHERE id = ?", (undated,)).fetchone()     # dry run: kept
+    stats = gemini.recheck(conn, log=lambda *_: None)
+    assert (stats["festival_shows"], stats["unspecific_shows"], stats["discovered_dropped"],
+            stats["shows_deleted"]) == (1, 1, 1, 1)
+    assert set(billing(conn, good)) == {"Ty Segall", "Knee"}
+    assert set(billing(conn, wrong)) == {"Ty Segall"} and set(billing(conn, fest)) == {"Ty Segall"}
+    assert not conn.execute("SELECT 1 FROM shows WHERE id = ?", (undated,)).fetchone()
+    assert state.get(conn, "gemini", f"show:{fest}")["interval_days"] == gemini.DONE_DAYS
+    assert gemini.queue_shows(conn) >= 1 and state.get(conn, "gemini", f"show:{wrong}")   # asked again
+
+
+def test_a_band_named_after_a_weekday_is_not_a_date():
+    show = {"date": "2024-10-28", "venue": "Exit/In", "city": "Nashville"}
+    assert gemini.names_this_show("Exit/In w/ Wednesday", show, ["Wednesday"])
+    assert not gemini.names_this_show("Exit/In w/ Wednesday", show)
+
+
+def test_quotes_may_shorten_the_venue_or_pin_the_date():
+    assert gemini.venue_keys("Le Transbordeur") == ["le transbordeur", "transbordeur"]
+    assert "teragram" in gemini.venue_keys("Teragram Ballroom")
+    assert gemini.venue_keys("Hall") == ["hall"]
+    assert gemini.names_this_show("[complet] OSEES + OVER-GAIN OPTIMAL DEATH au Transbordeur — Sunday, July 3, 2022",
+                                  {"date": "2022-07-03", "venue": "Le Transbordeur", "city": "Villeurbanne"})
+    assert gemini.names_this_show("VOLUME 3 with support from Coral Web [November 29, 2025 / Doors 8pm",
+                                  {"date": "2025-11-29", "venue": "Teragram Ballroom", "city": "Los Angeles"})
+    assert gemini.names_this_show("Fri, Sept 16 – Thalia Hall * Sat, Sept 17 – Thalia Hall * with Bronze",
+                                  {"date": "2022-09-17", "venue": "Thalia Hall", "city": "Chicago", "need_date": True})
+    assert not gemini.names_this_show("Joining Osees on May 16th for a night of psychedelic rock",
+                                      {"date": "2025-05-16", "venue": "Podium Kruidtuin", "city": "Brussels"})
