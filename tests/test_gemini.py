@@ -477,13 +477,22 @@ def test_a_new_show_needs_its_year_pinned_down():
     assert not gemini.date_confirmed("by Old Psyche Man on 9/17/24 191 Toole - Tucson", "2025-09-17")
 
 
-def test_festivals_store_nothing_and_are_not_asked_again(conn):
+def test_festival_lineups_are_kept_flagged_and_not_exported(conn):
+    from concertdb import export
     show = ty_show(conn, "2017-07-21", "Exposition Park", "Los Angeles")
     lineup = {"shows": [{"date": "2017-07-21", "festival": True, "headliner": "Missy Elliott",
-                         "openers": ["Bjork", "Ty Segall"], "show_specific_quote": None, "url": None}]}
-    client = FakeClient([answer(lineup)], searches={"Exposition": web(("https://fyf.example", "FYF", ""))})
+                         "openers": ["Bjork", "Ty Segall"], "url": "https://fyf.example",
+                         "show_specific_quote": "FYF Fest, Exposition Park, July 21 2017: Missy Elliott, Bjork, Ty Segall"}]}
+    client = FakeClient([answer(lineup)], searches={"Exposition": web(
+        ("https://fyf.example", "FYF Fest 2017",
+         "FYF Fest, Exposition Park, July 21 2017: Missy Elliott, Bjork, Ty Segall"))})
     stats = gemini.ask(conn, client, **QUIET)
-    assert stats["festival"] == 1 and not conn.execute("SELECT 1 FROM claims WHERE source = 'gemini'").fetchone()
+    assert stats["festival"] == 1 and len(client.prompts) == 1
+    assert set(billing(conn, show)) == {"Missy Elliott", "Bjork", "Ty Segall"}
+    assert all(json.loads(r["extra"])["festival"] for r in conn.execute(
+        "SELECT extra FROM claims WHERE source = 'gemini'"))
+    assert conn.execute("SELECT is_festival FROM shows WHERE id = ?", (show,)).fetchone()[0] == 1
+    assert export.opened_for(conn, min_conf=0) == []
     assert state.get(conn, "gemini", f"show:{show}")["interval_days"] == gemini.DONE_DAYS
     many = {"date": "2017-07-21", "festival": False, "headliner": "X", "openers": list("ABCDEFG"),
             "quote": None, "url": None}
@@ -538,7 +547,8 @@ def test_recheck_deletes_what_the_rules_now_reject(conn):
     assert (stats["festival_shows"], stats["unspecific_shows"], stats["discovered_dropped"],
             stats["shows_deleted"]) == (1, 1, 1, 1)
     assert set(billing(conn, good)) == {"Ty Segall", "Knee"}
-    assert set(billing(conn, wrong)) == {"Ty Segall"} and set(billing(conn, fest)) == {"Ty Segall"}
+    assert set(billing(conn, wrong)) == {"Ty Segall"} and len(billing(conn, fest)) == 9      # lineup kept
+    assert conn.execute("SELECT is_festival FROM shows WHERE id = ?", (fest,)).fetchone()[0] == 1
     assert not conn.execute("SELECT 1 FROM shows WHERE id = ?", (undated,)).fetchone()
     assert state.get(conn, "gemini", f"show:{fest}")["interval_days"] == gemini.DONE_DAYS
     assert gemini.queue_shows(conn) >= 1 and state.get(conn, "gemini", f"show:{wrong}")   # asked again

@@ -88,7 +88,7 @@ MAX_PAGE_CHARS = 6000       # excerpt text per page in a prompt
 MAX_PROMPT_CHARS = 60000
 DISCOVER_DAYS = 14
 PROMPT_VERSION = 3
-MAX_OPENERS = 6             # more support acts than this is a festival lineup, not a bill
+MAX_OPENERS = 6             # more support acts than this is a festival lineup, not one bill
 TRANSIENT = (500, 502, 503, 504)   # "overloaded": waited out like a per-minute 429
 TRANSIENT_WAIT = 30
 NOT_FOUND_MIN_DAYS = 90
@@ -278,7 +278,7 @@ def build_prompt(artist: str, shows: list[dict], pages: list[dict], snippets: li
         "with a quote copied exactly from the text that names its date and venue (the venue's own name, "
         "not just the city; leave out shows whose venue isn't given). Leave it empty if none.",
         "festival: true if the show was a festival or multi-stage event (a lineup, not one bill); then "
-        "leave openers empty.",
+        "headliner is its top-billed act and openers the rest of the lineup in billing order.",
         "Don't guess: an empty openers list is fine. Don't include the headliner among the openers.",
         "", "SHOWS:",
     ]
@@ -694,9 +694,6 @@ class Run:
     def judge(self, show: dict, ans: dict | None, texts: list[dict]) -> dict:
         """Which acts of an answer hold up against the texts, and how firmly."""
         out = {"specific": False, "acts": [], "quote": None, "url": None, "dropped": [], "festival": False}
-        if ans and (ans.get("festival") or len(ans["openers"]) > MAX_OPENERS):
-            out["festival"] = True
-            return out
         if not ans or not ans["openers"]:
             return out
         headliner = ans["headliner"] or show["lead"]
@@ -719,6 +716,7 @@ class Run:
         if not any(role == "opener" for _, role, *_ in out["acts"]):
             out["acts"] = []
         out["specific"] = specific
+        out["festival"] = ans["festival"] or len(ans["openers"]) > MAX_OPENERS
         out["quote"] = ans["quote"] if specific else None
         out["url"] = src["url"] if specific else None
         return out
@@ -726,11 +724,6 @@ class Run:
     def store(self, show: dict, r: dict) -> None:
         key = f"show:{show['id']}"
         self.stats["shows"] += 1
-        if r["festival"]:     # the queue skips festivals: being on the lineup isn't opening
-            state.postpone(self.conn, SOURCE, key, DONE_DAYS)
-            self.stats["festival"] += 1
-            self.log(f"    {show['date']} {show['venue']}: a festival, skipped")
-            return
         if r["dropped"]:
             self.log(f"    {show['date']}: not on any fetched page, dropped: {', '.join(r['dropped'])}")
         if not r["acts"]:
@@ -742,12 +735,16 @@ class Run:
         for name, role, pos, check, url in r["acts"]:
             conf = CONF_SPECIFIC if check == "specific" else CONF_PAGE
             extra = {"model": self.model, "prompt_version": PROMPT_VERSION, "check": check,
+                     **({"festival": True} if r["festival"] else {}),
                      **({"quote": r["quote"][:500]} if check == "specific" and r["quote"] else {})}
             aid = show["lead_id"] if norm(name) == norm(show["lead"]) else ledger.get_or_create_artist(self.conn, name)
             ledger.add_claim(self.conn, show["id"], aid, SOURCE, key, role=role, confidence=conf,
                              position=pos, url=url, extra=extra, resolve=False)
-        ledger.resolve_show(self.conn, show["id"])
-        if r["specific"]:
+        ledger.resolve_show(self.conn, show["id"])     # a festival flag on a claim marks the show
+        if r["festival"]:   # a lineup: kept as a data point, not an opened-for; not asked again
+            state.postpone(self.conn, SOURCE, key, DONE_DAYS)
+            self.stats["festival"] += 1
+        elif r["specific"]:
             state.postpone(self.conn, SOURCE, key, DONE_DAYS)
             self.stats["specific"] += 1
         else:   # tour-wide evidence only: kept, and asked again later
@@ -773,8 +770,6 @@ class Run:
                 continue
             if norm(o["venue"]) in (norm(o["city"]), norm(o["country"])):
                 continue                                # a tour listing by city: no venue to file it under
-            if o["festival"] or len(o["openers"]) > MAX_OPENERS:
-                continue
             seen.add((o["date"], norm(o["venue"])))
             src = quote_source(o["quote"], texts)
             qwords = _padded(o["quote"])
@@ -818,7 +813,9 @@ class Run:
                                  confidence=CONF_SPECIFIC if in_quote else CONF_PAGE,
                                  position=pos if role != "unknown" else None, url=src["url"],
                                  extra={"model": self.model, "prompt_version": PROMPT_VERSION,
-                                        "check": "discovered", "quote": o["quote"][:500]},
+                                        "check": "discovered", "quote": o["quote"][:500],
+                                        **({"festival": True} if o["festival"] or len(o["openers"]) > MAX_OPENERS
+                                           else {})},
                                  resolve=False)
                 stored.append(f"{name} ({role})")
             ledger.resolve_show(self.conn, show_id)
@@ -889,7 +886,8 @@ def recheck(conn: sqlite3.Connection, dry_run: bool = False, log=print) -> dict:
     current rules, using the quote each kept; delete what fails.
 
     - a show whose Gemini claims list more than MAX_OPENERS openers: a festival
-      lineup; its claims go and the show isn't asked again
+      lineup; its claims are kept, flagged as a festival (so the show is marked
+      as one and isn't exported as opened-for), and it isn't asked again
     - a "specific" claim whose quote doesn't name the show (venue, or date and
       city; no other year or weekday): that show's Gemini claims go and it is
       asked again
@@ -911,6 +909,7 @@ def recheck(conn: sqlite3.Connection, dry_run: bool = False, log=print) -> dict:
             groups.setdefault((r["show_id"], r["native_id"]), []).append((r, extra))
 
     doomed: list[tuple] = []        # (show_id, native_id, requeue: bool | None)
+    festivals: list[tuple] = []
     for (show_id, native), claims in groups.items():
         r0 = claims[0][0]
         show = {"date": r0["date"], "venue": r0["venue"], "city": r0["city"]}
@@ -923,8 +922,9 @@ def recheck(conn: sqlite3.Connection, dry_run: bool = False, log=print) -> dict:
                 stats["discovered_dropped"] += 1
                 log(f"  discovered {r0['date']} {r0['venue']}: {quote[:80]!r}")
             continue
-        if sum(1 for r, _ in claims if r["role"] == "opener") > MAX_OPENERS:
-            doomed.append((show_id, native, False))
+        if sum(1 for r, _ in claims if r["role"] == "opener") > MAX_OPENERS \
+                and not all(e.get("festival") for _, e in claims):
+            festivals.append((show_id, native))
             stats["festival_shows"] += 1
             log(f"  festival {r0['date']} {r0['venue']}: {len(claims)} acts")
             continue
@@ -945,6 +945,12 @@ def recheck(conn: sqlite3.Connection, dry_run: bool = False, log=print) -> dict:
     if dry_run:
         return stats
     db.begin_write(conn)
+    for show_id, native in festivals:
+        conn.execute("UPDATE claims SET extra = json_set(COALESCE(extra, '{}'), '$.festival', json('true'))"
+                     " WHERE source = ? AND show_id = ? AND native_id = ?", (SOURCE, show_id, native))
+        ledger.resolve_show(conn, show_id)
+        state.ensure(conn, SOURCE, native)
+        state.postpone(conn, SOURCE, native, DONE_DAYS)
     for show_id, native, requeue in doomed:
         stats["claims_deleted"] += conn.execute(
             "DELETE FROM claims WHERE source = ? AND show_id = ? AND native_id = ?",
@@ -953,10 +959,7 @@ def recheck(conn: sqlite3.Connection, dry_run: bool = False, log=print) -> dict:
             stats["shows_deleted"] += 1
         else:
             ledger.resolve_show(conn, show_id)
-        if requeue is True:
+        if requeue:
             state.forget(conn, SOURCE, native)      # queue_shows brings it back, due now
-        elif requeue is False:
-            state.ensure(conn, SOURCE, native)
-            state.postpone(conn, SOURCE, native, DONE_DAYS)
     conn.commit()
     return stats

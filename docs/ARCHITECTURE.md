@@ -189,10 +189,12 @@ at a time:
    opener. A support act announced "on all dates" isn't proof for each date,
    so a show that isn't done gets its own search and Gemini call (at most 4
    per tour).
-5. Festivals: Gemini says whether each show was a festival; a festival, or
-   more than 6 openers, stores nothing and isn't asked again (being on a
-   lineup isn't opening; setlist.fm often lists a festival set as a one-act
-   show).
+5. Festivals: Gemini says whether each show was a festival (setlist.fm often
+   lists a festival set as a one-act show). A festival, or more than 6
+   openers, is kept as a lineup, checked like any bill, with
+   `extra.festival` on its claims; that marks the show `is_festival` (as does a
+   Pollstar `isFestival` event, or 8+ acts), so it isn't exported as
+   opened-for, and it isn't asked again. How to use lineups is for later.
 6. Shows by the same artist that the pages list but the ledger lacks
    (`other_shows`) are added when their quote is on a fetched page, names the
    venue and the date, and pins the year down (states it, or the right
@@ -203,8 +205,9 @@ at a time:
    Claim key `found:<artist>:<date>`, `extra.check` = `discovered`.
 
 `concertdb gemini-recheck [--dry-run]` re-tests stored claims against these
-rules, from the quote each kept, and deletes what fails (shows asked again or,
-for festivals, not; discovered shows deleted if nothing else claims them).
+rules, from the quote each kept: quotes that fail are deleted (the show is
+asked again; a discovered show is deleted if nothing else claims it), and
+lineups of more than 6 openers are flagged as festivals.
 
 | Check | Confidence | × weight 0.6 | Exported at the default 0.4? |
 |---|---|---|---|

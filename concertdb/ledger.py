@@ -298,7 +298,12 @@ def resolve_show(conn: sqlite3.Connection, show_id: int) -> None:
             (show_id, artist_id, role, position, round(conf, 4), n_sources),
         )
 
+    # A festival: a long bill, or a source said so (extra.festival on any claim).
+    flagged = conn.execute(
+        "SELECT 1 FROM claims WHERE show_id = ? AND json_extract(extra, '$.festival') = 1 LIMIT 1",
+        (show_id,),
+    ).fetchone()
     conn.execute(
         "UPDATE shows SET is_festival = ?, updated_at = ? WHERE id = ?",
-        (1 if len(by_artist) >= FESTIVAL_MIN_ACTS else 0, now_iso(), show_id),
+        (1 if len(by_artist) >= FESTIVAL_MIN_ACTS or flagged else 0, now_iso(), show_id),
     )

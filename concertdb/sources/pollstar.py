@@ -144,10 +144,10 @@ def ingest_event(conn: sqlite3.Connection, e: dict, venue_id: int) -> int:
                                          source=SOURCE, native_id=e["id"])
     for pos, (aid, role, conf) in enumerate(acts):
         ledger.add_claim(conn, show_id, aid, SOURCE, e["id"], role=role, confidence=conf, position=pos,
-                         url=e["url"], extra={"title": e["name"], "date": e["date"]}, resolve=False)
-    ledger.resolve_show(conn, show_id)  # recomputes is_festival from act count
-    if e["is_festival"]:
-        conn.execute("UPDATE shows SET is_festival = 1 WHERE id = ?", (show_id,))
+                         url=e["url"], extra={"title": e["name"], "date": e["date"],
+                                              **({"festival": True} if e["is_festival"] else {})},
+                         resolve=False)
+    ledger.resolve_show(conn, show_id)  # is_festival: act count, or the claims' festival flag
     return show_id
 
 
