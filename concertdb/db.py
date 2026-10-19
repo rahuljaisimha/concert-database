@@ -119,6 +119,15 @@ CREATE TABLE IF NOT EXISTS crawl_state (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_crawl_due ON crawl_state(source, next_due);
 
+-- Other names of graph artists (MusicBrainz name, sort name, aliases), for
+-- matching sources that send only a name. See concertdb/aliases.py.
+CREATE TABLE IF NOT EXISTS artist_aliases (
+    alias_norm TEXT NOT NULL,
+    artist_id  TEXT NOT NULL,
+    alias      TEXT NOT NULL,
+    PRIMARY KEY (alias_norm, artist_id)
+) STRICT;
+
 -- Requests and money spent, per source per day (budgets and caps).
 CREATE TABLE IF NOT EXISTS usage (
     day      TEXT NOT NULL,

@@ -69,6 +69,7 @@ concertdb pollstar
 concertdb gemini
 concertdb gemini-eval                 # the same, live, on shows whose bills we know
 
+concertdb mb-aliases                  # graph artists' other names from MusicBrainz's dump (now and then)
 concertdb status                      # coverage and progress
 concertdb shows "Flat Worms"          # what we know about an artist
 concertdb export --graph-only         # data/export/opened_for.csv for MusicSceneMap

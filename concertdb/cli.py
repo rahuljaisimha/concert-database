@@ -7,7 +7,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from . import backup, db, export, ledger, seed, smoke, state, status
+from . import aliases, backup, db, export, ledger, seed, smoke, state, status
 from .http import Fetcher
 from .normalize import norm
 from .sources import gemini, jsonld, pollstar, setlistfm
@@ -139,6 +139,10 @@ def cmd_crawl_setlistfm(args):
 
 def _gemini_client(args):
     return gemini.client_from_env(_data_dir(args), model=args.model)
+
+
+def cmd_mb_aliases(args):
+    print(aliases.load(_conn(args), args.dump))
 
 
 def cmd_gemini_eval(args):
@@ -310,6 +314,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="only ask about shows with at most this many acts listed"
                         f" (default: $GEMINI_MAX_ACTS, else {gemini.MAX_ACTS})")
     s.set_defaults(fn=cmd_gemini, locked="gemini")
+
+    s = sub.add_parser("mb-aliases", help="load graph artists' other names (aliases) from MusicBrainz's"
+                       " data dump, streamed (~7 GB download, ~10 MB kept)")
+    s.add_argument("--dump", help="URL or path of mbdump.tar.bz2 (default: the latest full export)")
+    s.set_defaults(fn=cmd_mb_aliases)     # reads for a while, writes once at the end
 
     s = sub.add_parser("gemini-eval", help="run the search + Gemini step on shows whose bills we know"
                        " (concertdb/gemini_cases.json) in a throwaway database, and score it")

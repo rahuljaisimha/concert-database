@@ -38,8 +38,10 @@ def get_or_create_artist(conn: sqlite3.Connection, name: str, mbid: str | None =
     """Return the artist id for a name (and MBID if the source has one).
 
     With an MBID the match is exact. Without one, a name that matches exactly
-    one artist in the graph resolves to it; otherwise an unresolved
-    'name:<norm>' artist is used so the fact is still recorded.
+    one artist in the graph resolves to it; failing that, a MusicBrainz alias
+    ("Thee Oh Sees" for Osees; artist_aliases) of exactly one graph artist does;
+    otherwise an unresolved 'name:<norm>' artist is used so the fact is still
+    recorded.
     """
     n = norm(name)
     if mbid:
@@ -57,6 +59,13 @@ def get_or_create_artist(conn: sqlite3.Connection, name: str, mbid: str | None =
     ).fetchall()
     if len(rows) == 1:
         return rows[0]["id"]
+    if not rows:
+        rows = conn.execute(
+            "SELECT DISTINCT a.id FROM artist_aliases al JOIN artists a ON a.id = al.artist_id"
+            " WHERE al.alias_norm = ? AND a.in_graph = 1", (n,)
+        ).fetchall()
+        if len(rows) == 1:
+            return rows[0]["id"]
 
     aid = f"name:{n}"
     conn.execute(

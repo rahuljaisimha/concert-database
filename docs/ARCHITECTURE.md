@@ -4,6 +4,7 @@
 
 ```
 artists   id = MusicBrainz ID, or 'name:<normalized>' when not matched to the graph
+artist_aliases  graph artists' other MusicBrainz names (see "Matching names")
 venues    + venue_source_ids (each source's own venue id → our venue)
 shows     one per venue per night (see "Which records are the same show")
 claims    what ONE source says about ONE artist at ONE show:
@@ -13,6 +14,20 @@ crawl_state  one row per unit of work: next_due, adaptive interval, cursor, etag
 usage     requests and $ per source per day (budgets, caps; Gemini's day is
           Pacific time, when its free quota resets)
 ```
+
+### Matching names
+
+setlist.fm sends MusicBrainz IDs; Pollstar, Gemini and pages send only names.
+A name resolves to the graph artist with that (normalized) name if exactly one
+has it; failing that, to the graph artist that has it as a MusicBrainz name or
+alias ("Thee Oh Sees", "Oh Sees" → Osees); otherwise to an unmatched `name:`
+artist. Only aliases that no other MusicBrainz artist has (as name or alias)
+are used: "Camille" is an alias of Prince, but most Camilles on a bill are
+someone else, and sort names ("Cooper, Alan") are left out for the same
+reason. `concertdb mb-aliases` loads them from MusicBrainz's full data export
+(`mbdump.tar.bz2`, ~7 GB) read as a stream: the two tables it needs come
+first in the archive, so it reads ~500 MB and stops (about a minute). Run it
+again now and then to refresh.
 
 ### Which records are the same show
 
