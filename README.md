@@ -62,11 +62,12 @@ concertdb run
 # or the due work runs out. Runs next to `run`; `run` then skips Pollstar.
 concertdb pollstar
 
-# Find openers of past shows with only one act listed: Firecrawl search +
-# Gemini, a tour at a time (needs GEMINI_API_KEY and FIRECRAWL_API_KEY; spends
-# the Firecrawl credits left and stops at a quota; can run while `concertdb run` is
-# running; GEMINI_MAX_ACTS / --max-acts widens it)
+# Find openers of past shows with only one act listed: web search (a local
+# SearXNG, deploy/searxng.sh; else Firecrawl) + Gemini, a tour at a time (needs
+# GEMINI_API_KEY and SEARXNG_URL and/or FIRECRAWL_API_KEY; stops at a quota;
+# can run while `concertdb run` is running; GEMINI_MAX_ACTS / --max-acts widens it)
 concertdb gemini
+concertdb gemini-eval                 # the same, live, on shows whose bills we know
 
 concertdb status                      # coverage and progress
 concertdb shows "Flat Worms"          # what we know about an artist
@@ -101,7 +102,7 @@ crawl continues where it stopped.
 
 `pytest` uses fixtures in `tests/fixtures/` (see its README). `smoke-test`
 makes a few real requests per source (setlist.fm for Flat Worms, Pollstar for
-Zebulon, one Firecrawl search and one Gemini call for the Iguana Death Cult show at
+Zebulon, one search and one Gemini call for the Iguana Death Cult show at
 Zebulon, optionally one page with `--page-url`) into a throwaway database
 under `data/smoke/`, prints PASS/FAIL per source, and never touches the real
 ledger or its daily budgets. Its saved responses in `data/smoke/raw/` make

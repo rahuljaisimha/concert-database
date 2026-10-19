@@ -43,9 +43,12 @@ def run(work_dir: Path, graph: str, page_url: str | None = None, log=print) -> b
     conn.commit()
 
     # Before setlist.fm, so the show has only the headliner when Gemini is asked.
-    gkey, fkey = os.environ.get("GEMINI_API_KEY"), os.environ.get("FIRECRAWL_API_KEY")
-    results["Gemini"] = (_gemini(conn, work_dir, gkey, fkey, log) if gkey and fkey
-                         else (None, "GEMINI_API_KEY or FIRECRAWL_API_KEY not set"))
+    try:
+        gclient = gemini.client_from_env(work_dir)
+    except SystemExit as e:
+        gclient, results["Gemini"] = None, (None, str(e))
+    if gclient:
+        results["Gemini"] = _gemini(conn, gclient, log)
 
     key = os.environ.get("SETLISTFM_API_KEY")
     if key:
@@ -86,18 +89,15 @@ def _count(conn, source: str) -> int:
     return conn.execute("SELECT COUNT(*) FROM claims WHERE source = ?", (source,)).fetchone()[0]
 
 
-def _gemini(conn, work_dir: Path, key: str, search_key: str, log) -> tuple[bool, str]:
-    """One Firecrawl search (2 credits), its pages, and one Gemini call, for a show with a known opener."""
+def _gemini(conn, client, log) -> tuple[bool, str]:
+    """One search (SearXNG, else Firecrawl: 2 credits), its pages, and one Gemini call, for a
+    show with a known opener."""
     venue = ledger.get_or_create_venue(conn, TEST_VENUE, TEST_CITY)
     show = ledger.find_or_create_show(conn, GEMINI_DATE, venue)
     ledger.add_claim(conn, show, ledger.get_or_create_artist(conn, GEMINI_HEADLINER), "manual", "smoke",
                      role="headliner", confidence=1.0)
     state.ensure(conn, gemini.SOURCE, f"show:{show}", priority=10**9)
     conn.commit()
-    client = gemini.Client(Fetcher(work_dir, min_interval=gemini.MIN_INTERVAL),
-                           Fetcher(work_dir, min_interval=gemini.SEARCH_INTERVAL),
-                           Fetcher(work_dir, min_interval=gemini.PAGE_INTERVAL),
-                           key, search_key, model=os.environ.get("GEMINI_MODEL") or None)
     try:
         stats = gemini.ask(conn, client, max_requests=1, max_credits=gemini.SEARCH_CREDITS, log=log)
     except Exception as e:  # bad key, ...
@@ -108,6 +108,6 @@ def _gemini(conn, work_dir: Path, key: str, search_key: str, log) -> tuple[bool,
         (gemini.SOURCE, show, norm(TEST_ARTIST))).fetchone()
     if row:
         check = json.loads(row["extra"])["check"]
-        return True, (f"{stats['model']}: {TEST_ARTIST} found ({check}), {stats['searches']} search,"
+        return True, (f"{stats['model']}: {TEST_ARTIST} found ({check}), {stats['searches']} search ({'searxng' if stats['searxng'] else 'firecrawl'}),"
                       f" {stats['pages']} pages, {stats['tokens']:,} tokens")
     return False, f"{stats.get('model')}: {TEST_ARTIST} not found {stats}"

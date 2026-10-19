@@ -1,0 +1,23 @@
+# SearXNG settings for concertdb (deploy/searxng.sh install copies this to
+# ~/searxng/settings.yml and fills in the secret). Engines checked from a home
+# connection (Oct 2026): Google (its "cse" endpoint) gives good gig results;
+# Brave is good but suspends us after a few searches in a row; Bing ignores
+# quoted phrases (it answers "The Metro" with dictionary pages for "the");
+# Mojeek and DuckDuckGo refuse (access denied, CAPTCHA). So: Google, then Brave.
+use_default_settings:
+  engines:
+    keep_only:
+      - google cse
+      - brave
+general:
+  instance_name: "concertdb"
+server:
+  bind_address: "127.0.0.1"
+  port: 8888
+  secret_key: "@SECRET@"
+  limiter: false
+  image_proxy: false
+search:
+  formats: [html, json]
+outgoing:
+  request_timeout: 6.0

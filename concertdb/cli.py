@@ -138,18 +138,12 @@ def cmd_crawl_setlistfm(args):
 
 
 def _gemini_client(args):
-    key = os.environ.get("GEMINI_API_KEY")
-    if not key:
-        sys.exit("set GEMINI_API_KEY (get one at https://aistudio.google.com/apikey)")
-    search_key = os.environ.get("FIRECRAWL_API_KEY")
-    if not search_key:
-        sys.exit("set FIRECRAWL_API_KEY (https://www.firecrawl.dev/app/api-keys):"
-                 " Gemini reads the pages a Firecrawl search finds")
-    d = _data_dir(args)
-    return gemini.Client(Fetcher(d, min_interval=gemini.MIN_INTERVAL),
-                         Fetcher(d, min_interval=gemini.SEARCH_INTERVAL),
-                         Fetcher(d, min_interval=gemini.PAGE_INTERVAL),
-                         key, search_key, model=args.model or os.environ.get("GEMINI_MODEL") or None)
+    return gemini.client_from_env(_data_dir(args), model=args.model)
+
+
+def cmd_gemini_eval(args):
+    from . import gemini_eval
+    print(gemini_eval.run(_data_dir(args), args.case or None))
 
 
 def _monthly_credits() -> int | None:
@@ -316,6 +310,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="only ask about shows with at most this many acts listed"
                         f" (default: $GEMINI_MAX_ACTS, else {gemini.MAX_ACTS})")
     s.set_defaults(fn=cmd_gemini, locked="gemini")
+
+    s = sub.add_parser("gemini-eval", help="run the search + Gemini step on shows whose bills we know"
+                       " (concertdb/gemini_cases.json) in a throwaway database, and score it")
+    s.add_argument("--case", action="append", help="only this case (repeatable)")
+    s.set_defaults(fn=cmd_gemini_eval)
 
     s = sub.add_parser("run", help="one scheduled cycle: watched pages, setlist.fm, Pollstar, backup")
     s.add_argument("--setlistfm-requests", type=int, default=setlistfm.DAILY_LIMIT)

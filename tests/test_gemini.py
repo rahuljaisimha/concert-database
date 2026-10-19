@@ -6,7 +6,7 @@ import requests
 from concertdb import ledger, seed, state
 from concertdb.http import Response
 from concertdb.sources import gemini
-from conftest import add_graph_artist, ok, status
+from conftest import add_graph_artist, fixture_text, ok, status
 
 TY = "07a17571-81fc-4cf8-a634-98f0d926d313"
 OTHER = "11111111-2222-3333-4444-555555555555"
@@ -505,8 +505,31 @@ def test_undated_listings_are_not_added(conn):
     a = json.loads(json.dumps(TOUR_ANSWER))
     a["other_shows"][0]["quote"] = "28 FEB – DAZE AWAY @ A & I HALL, BANGALOW w/ Earth Tongue, Media Puzzle"
     client.answers[0] = answer(a)
-    client.pages[TOUR_URL] = TOUR_PAGE.replace("SAT 28 FEB", "28 FEB")
+    client.pages[TOUR_URL] = TOUR_PAGE.replace("SAT 28 FEB", "28 FEB").replace("2026", "")   # no year anywhere
     assert gemini.ask(conn, client, **QUIET)["discovered"] == 0
+
+
+def test_a_listing_takes_its_year_from_the_heading_above_it():
+    page = gemini._padded("Ty Segall announces 2026 tour dates. Feb. 28 \u2013 Bangalow, NSW @ A & I Hall (DAZE AWAY)")
+    quote = "Feb. 28 \u2013 Bangalow, NSW @ A & I Hall (DAZE AWAY)"
+    assert gemini.year_from_context(page, quote, "2026-02-28")
+    assert not gemini.year_from_context(page, quote, "2025-02-28")
+    older = gemini._padded("2016 tour: June 9 \u2013 Manchester. ... 2025 European tour: June 9 \u2013 New Century \u2013 Manchester")
+    assert gemini.year_from_context(older, "June 9 \u2013 New Century \u2013 Manchester", "2025-06-09")
+    assert not gemini.year_from_context(older, "June 9 \u2013 New Century \u2013 Manchester", "2016-06-09")
+
+
+def test_page_evidence_must_be_near_the_artist_or_the_date():
+    words = gemini._padded("Le Transbordeur agenda. 3 juillet: Osees. " + "x " * 300 + "12 juillet: Jade, Andy4k")
+    assert gemini.near(words, "Osees", ["Osees", "3 juillet"])
+    assert not gemini.near(words, "Jade", ["Osees", "3 juillet"])
+
+
+def test_a_social_handle_becomes_the_artist(conn):
+    add_graph_artist(conn, "fw", "Flat Worms")
+    run = gemini.Run(conn, FakeClient([]), 1, None, None, 1, print)
+    assert run.canonical("@flatwormsband") == "Flat Worms" and run.canonical("flatworms") == "Flat Worms"
+    assert run.canonical("Hot Garbage") == "Hot Garbage" and run.canonical("knee") == "knee"
 
 
 def test_overloaded_gemini_is_waited_out(conn, monkeypatch):
@@ -537,3 +560,124 @@ def test_quotes_may_shorten_the_venue_or_pin_the_date():
                                   {"date": "2022-09-17", "venue": "Thalia Hall", "city": "Chicago", "need_date": True})
     assert not gemini.names_this_show("Joining Osees on May 16th for a night of psychedelic rock",
                                       {"date": "2025-05-16", "venue": "Podium Kruidtuin", "city": "Brussels"})
+
+
+# ------------------------------------------------------------------ SearXNG
+
+class SearxClient(FakeClient):
+    """FakeClient with a local SearXNG: searx[substring] -> Response (or a list of them)."""
+    searxng_url = "http://127.0.0.1:8888"
+
+    def __init__(self, answers, searx=None, searches=None, pages=None, firecrawl=True):
+        super().__init__(answers, searches, pages)
+        self.searx = searx or {}
+        self.searx_queries = []
+        self.has_firecrawl = firecrawl
+
+    def searxng(self, query):
+        self.searx_queries.append(query)
+        for k, v in self.searx.items():
+            if k in query:
+                if isinstance(v, list):
+                    v = v.pop(0) if len(v) > 1 else v[0]
+                return v
+        return ok(json.dumps({"results": [], "unresponsive_engines": []}))
+
+
+def searx(*results, down=()):
+    return ok(json.dumps({"results": [{"url": u, "title": t, "content": d, "engines": ["google cse"]}
+                                      for u, t, d in results],
+                          "unresponsive_engines": [[e, "CAPTCHA"] for e in down]}))
+
+
+def test_searxng_results_from_a_captured_answer():
+    raw = json.loads(fixture_text("searxng_ty_venues.json"))
+    results, down = gemini.searxng_results(raw)
+    assert "https://mistletone.net/news/ty-segall/" in [r["url"] for r in results]
+    assert all(set(r) == {"url", "title", "description"} for r in results)
+    assert gemini.searxng_results({"results": [], "unresponsive_engines": [["brave", "too many requests"]]}) == ([], ["brave"])
+
+
+def test_searxng_is_used_first_and_costs_no_credits(conn):
+    ty_tour(conn)
+    c = ty_client()
+    client = SearxClient(c.answers, searx={"tour support": searx((TOUR_URL, "Ty Segall Australian Tour", "Earth Tongue on all dates")),
+        '"The Metro" Sydney': searx((METRO_URL, "Ty Segall - The Metro", "Monday 2 March"))}, pages=c.pages)
+    stats = gemini.ask(conn, client, **QUIET)
+    assert stats["specific"] == 3 and stats["searxng"] == stats["searches"] == 3
+    assert client.queries == [] and stats["credits"] == 0
+    assert state.requests_today(conn, "searxng") == 3 and state.requests_today(conn, "firecrawl") == 0
+
+
+def test_firecrawl_takes_over_when_searxng_stops_answering(conn):
+    ty_tour(conn)
+    c = ty_client()
+    blocked = searx(down=("google cse", "brave"))
+    client = SearxClient(c.answers, searx={"Ty Segall": blocked}, searches=c.searches, pages=c.pages)
+    stats = gemini.ask(conn, client, **QUIET)
+    # Tour + venue query fail on SearXNG (and go to Firecrawl); the third failure switches it off.
+    assert len(client.searx_queries) == gemini.SEARXNG_MAX_FAILS
+    assert stats["specific"] == 3 and len(client.queries) == 3
+
+
+def test_no_search_left_ends_the_run(conn):
+    ty_tour(conn)
+    client = SearxClient([], searx={"Ty Segall": searx(down=("google cse",))}, firecrawl=False)
+    stats = gemini.ask(conn, client, **QUIET)
+    assert stats["stopped"].startswith("SearXNG isn't answering") and len(state.due(conn, "gemini")) == 3
+
+
+def test_client_needs_some_search(tmp_path):
+    import pytest
+    with pytest.raises(SystemExit, match="SEARXNG_URL"):
+        gemini.client_from_env(tmp_path, env={"GEMINI_API_KEY": "k"})
+    c = gemini.client_from_env(tmp_path, env={"GEMINI_API_KEY": "k", "SEARXNG_URL": "http://127.0.0.1:8888/"})
+    assert c.searxng_url == "http://127.0.0.1:8888" and not c.has_firecrawl
+    assert gemini.client_from_env(tmp_path, env={"GEMINI_API_KEY": "k", "FIRECRAWL_API_KEY": "f"}).searxng_url is None
+
+
+# ------------------------------------------------------------------ a known case, captured
+
+MISTLETONE = "https://mistletone.net/news/ty-segall/"
+
+
+def test_ty_segall_australia_2026_from_captured_pages(conn):
+    """The case in concertdb/gemini_cases.json, with the real search answers and tour page
+    (tests/fixtures) and the answer Gemini gave: every opener, show-specific, and the
+    two dates the ledger didn't have."""
+    from concertdb import gemini_eval
+    case = gemini_eval.load_cases(["ty-segall-au-2026"])[0]
+    ids = gemini_eval.setup(conn, case)
+    q = {
+        "2026-02-26": "GOLD COAST / KOMBUMERRI: THURSDAY FEBRUARY 26 @ MO’S DESERT CLUBHOUSE with EARTH TONGUE (NZ) + SPEEDING VEHICLE",
+        "2026-02-27": "BRISBANE / MAGANDJIN: FRIDAY FEBRUARY 27 @ PRINCESS THEATRE with EARTH TONGUE (NZ) + KNEE",
+        "2026-03-02": "SYDNEY / EORA: MONDAY MARCH 2 @ THE METRO with EARTH TONGUE (NZ) + R.M.F.C",
+        "2026-03-04": "MELBOURNE / NAARM: WEDNESDAY MARCH 4 @ THE CROXTON with EARTH TONGUE (NZ) + DR SURE’S UNUSUAL PRACTICE",
+        "2026-03-06": "BARWON HEADS / WADAWARRUNG: FRI MAR 6 @ BARWON HEADS HOTEL with EARTH TONGUE (NZ) + DR SURE’S UNUSUAL PRACTICE",
+    }
+    shows = [{"date": s["date"], "festival": False, "headliner": "Ty Segall", "openers": s["openers"],
+              "show_specific_quote": q[s["date"]], "url": MISTLETONE} for s in case["shows"]]
+    others = [
+        {"date": "2026-02-28", "festival": False, "venue": "A & I Hall", "city": "Bangalow", "country": "Australia",
+         "headliner": "Ty Segall", "openers": ["Earth Tongue", "Media Puzzle", "Love Banana", "Knee"], "url": MISTLETONE,
+         "quote": "BANGALOW / BUNDJALUNG: SATURDAY FEBRUARY 28: DAZE AWAY @ A & I HALL with EARTH TONGUE (NZ), "
+                  "MEDIA PUZZLE (Lismore), LOVE BANANA (Gold Coast) + KNEE (Brisbane)"},
+        {"date": "2026-03-01", "festival": False, "venue": "Waves", "city": "Wollongong", "country": "Australia",
+         "headliner": "Ty Segall", "openers": ["Earth Tongue", "Straight Arrows"], "url": MISTLETONE,
+         "quote": "WOLLONGONG / DHARAWAL: SUNDAY MARCH 1 @ WAVES with EARTH TONGUE (NZ) + STRAIGHT ARROWS"},
+        {"date": "2026-03-08", "festival": True, "venue": "Golden Plains", "city": "Meredith", "country": "Australia",
+         "headliner": "Ty Segall", "openers": [], "url": MISTLETONE,
+         "quote": "MEREDITH / WADAWARRUNG: SUN MAR 8 @ GOLDEN PLAINS * SOLD OUT"},
+    ]
+    client = SearxClient([answer({"shows": shows, "other_shows": others})],
+                         searx={"tour support": ok(fixture_text("searxng_ty_tour.json")),
+                                "Ty Segall \"Mo's": ok(fixture_text("searxng_ty_venues.json"))},
+                         pages={MISTLETONE: fixture_text("mistletone_ty_segall.html")})
+    stats = gemini.ask(conn, client, **QUIET)
+    assert stats["searches"] == 2 and stats["gemini_calls"] == 1 and stats["specific"] == 5
+    rows = gemini_eval.score(conn, case, ids)
+    assert [(r["date"], r["missing"], r["extra"]) for r in rows] == [(r["date"], [], []) for r in rows]
+    assert all(r["checks"] == ["specific"] for r in rows if "(new)" not in r["venue"])
+    plains = conn.execute("SELECT is_festival FROM shows s JOIN venues v ON v.id = s.venue_id"
+                          " WHERE v.name = 'Golden Plains'").fetchone()
+    assert plains and plains[0] == 1

@@ -1,8 +1,10 @@
 """Openers for known shows that lack one: web search, fetched pages, Gemini reads them.
 
 Gemini's own Google Search grounding isn't on the free tier for current
-models, so the searching is done here, with Firecrawl's search API, and Gemini
-(no tools) only reads text we fetched ourselves. Work goes by tour, not show:
+models, so the searching is done here and Gemini (no tools) only reads text we
+fetched ourselves. Search goes to a local SearXNG (SEARXNG_URL; free, no cap;
+deploy/searxng.sh runs it) when there is one, else, or when it stops
+answering, to Firecrawl's search API. Work goes by tour, not show:
 
   1. Take the most urgent due show, and the same artist's other due shows that
      chain to it with gaps of at most TOUR_GAP_DAYS (up to TOUR_MAX_SHOWS).
@@ -29,6 +31,10 @@ Claims (source "gemini", weight 0.6):
 Budgets: spend what the providers allow, as fast as their per-minute limits
 allow. Every request is counted (and committed) before it is sent, so a crash
 can't hide spent quota.
+  - SearXNG (usage source "searxng", in searches): searches SEARXNG_INTERVAL
+    apart. It scrapes the search engines it is set to use (deploy/searxng-
+    settings.yml), which may block it: after SEARXNG_MAX_FAILS searches in a
+    row with no results and engines reported down, the run moves to Firecrawl.
   - Firecrawl (usage source "firecrawl", in credits; a 10-result search costs
     2): searches SEARCH_INTERVAL apart (free plan: 10 a minute). HTTP 402 (out
     of credits) ends the run. Optional cap: FIRECRAWL_MONTHLY_CREDITS a
@@ -47,6 +53,7 @@ import calendar
 import html as htmllib
 import json
 import math
+import os
 import re
 import sqlite3
 import time
@@ -64,6 +71,10 @@ SEARCH = "firecrawl"        # usage source for search credits; search responses 
 PAGES = "gemini-pages"      # source name for page fetches (not archived)
 API = "https://generativelanguage.googleapis.com/v1beta"
 SEARCH_API = "https://api.firecrawl.dev/v2/search"
+SEARXNG = "searxng"         # usage source for SearXNG searches; responses archived here
+SEARXNG_INTERVAL = 15.0     # between SearXNG searches: Google flagged "unusual traffic" after ~100
+                            # searches a few seconds apart in an afternoon
+SEARXNG_MAX_FAILS = 3       # empty searches in a row (engines down) before falling back to Firecrawl
 MODEL = "gemini-3.5-flash-lite"
 # Free tier, gemini-3.5-flash-lite: 15 requests/min, 500/day, 250k tokens/min. (gemini-3.8-flash
 # is 1/min and 20/day: too few for this.) A prompt is at most ~15k tokens (MAX_PROMPT_CHARS).
@@ -88,6 +99,9 @@ MAX_PAGE_CHARS = 6000       # excerpt text per page in a prompt
 MAX_PROMPT_CHARS = 60000
 DISCOVER_DAYS = 14
 PROMPT_VERSION = 3
+YEAR_CONTEXT_CHARS = 1500   # a listing without a year: the nearest year this far above it on the page counts
+NEAR_CHARS = 400            # "page" evidence: the act this close to the artist or the show's date
+HANDLE_SUFFIXES = ("band", "music", "official")   # @flatwormsband -> Flat Worms
 MAX_OPENERS = 6             # more support acts than this is a festival lineup, not one bill
 TRANSIENT = (500, 502, 503, 504)   # "overloaded": waited out like a per-minute 429
 TRANSIENT_WAIT = 30
@@ -241,6 +255,29 @@ def date_confirmed(quote: str, day: str, acts=()) -> bool:
         d.year in quote_years(quote) or d.weekday() in quote_weekdays(quote, acts))
 
 
+def year_from_context(words: str, quote: str, day: str) -> bool:
+    """A listing line without a year ("Feb. 28 - Bangalow @ A & I Hall") under a
+    heading or article that gives it ("2026 tour dates"): the nearest year above
+    the line on the page (words: _padded page text) is the show's year."""
+    parts = [norm(p) for p in re.split(r"\.\.\.|\u2026", quote or "") if norm(p)]
+    i = words.find(f" {parts[0]} ") if parts else -1
+    if i < 0:
+        return False
+    years = re.findall(r"(?<!\d)(19[5-9]\d|20[0-4]\d)(?!\d)", words[max(0, i - YEAR_CONTEXT_CHARS): i])
+    return bool(years) and int(years[-1]) == date.fromisoformat(day).year
+
+
+def _positions(words: str, phrase: str) -> list[int]:
+    n = norm(phrase)
+    return [m.start() for m in re.finditer(re.escape(f" {n} "), words)] if n else []
+
+
+def near(words: str, name: str, anchors, dist: int = NEAR_CHARS) -> bool:
+    """Is the name mentioned within dist characters of one of the anchors?"""
+    spots = [p for a in anchors for p in _positions(words, a)]
+    return any(abs(p - q) <= dist for p in _positions(words, name) for q in spots)
+
+
 def names_this_show(quote: str, show: dict, acts=()) -> bool:
     """A show-specific quote: it names the venue, or the date with the city or the
     year/weekday (the date alone at a residency), and doesn't state another year
@@ -279,6 +316,8 @@ def build_prompt(artist: str, shows: list[dict], pages: list[dict], snippets: li
         "not just the city; leave out shows whose venue isn't given). Leave it empty if none.",
         "festival: true if the show was a festival or multi-stage event (a lineup, not one bill); then "
         "headliner is its top-billed act and openers the rest of the lineup in billing order.",
+        "Write act names as the bill spells them, not social-media handles (\"Flat Worms\", not "
+        "\"@flatwormsband\").",
         "Don't guess: an empty openers list is fine. Don't include the headliner among the openers.",
         "", "SHOWS:",
     ]
@@ -370,13 +409,24 @@ def quote_source(quote: str | None, texts: list[dict]) -> dict | None:
 
 class Client:
     def __init__(self, fetcher: Fetcher, search_fetcher: Fetcher, page_fetcher: Fetcher,
-                 key: str, search_key: str, model: str | None = None):
+                 key: str, search_key: str | None, model: str | None = None,
+                 searxng_url: str | None = None, searxng_fetcher: Fetcher | None = None):
         self.fetcher = fetcher
         self.search_fetcher = search_fetcher
         self.page_fetcher = page_fetcher
         self.headers = {"x-goog-api-key": key}      # headers, so keys never land in the archive
-        self.search_headers = {"Authorization": f"Bearer {search_key}"}
+        self.search_headers = {"Authorization": f"Bearer {search_key}"} if search_key else None
         self.model = model or MODEL
+        self.searxng_url = searxng_url.rstrip("/") if searxng_url else None
+        self.searxng_fetcher = searxng_fetcher or search_fetcher
+
+    @property
+    def has_firecrawl(self) -> bool:
+        return self.search_headers is not None
+
+    def searxng(self, query: str):
+        return self.searxng_fetcher.get(SEARXNG, f"{self.searxng_url}/search",
+                                        params={"q": query, "format": "json"}, timeout=60)
 
     def generate(self, model: str, prompt: str):
         body = {"contents": [{"parts": [{"text": prompt}]}],
@@ -391,6 +441,32 @@ class Client:
     def page(self, url: str):
         # Whole pages would be most of the archive; claims keep the quote instead.
         return self.page_fetcher.get(PAGES, url, keep_raw=False)
+
+
+def client_from_env(data_dir, model: str | None = None, env=None) -> "Client":
+    """The client the CLI, smoke test and eval use: GEMINI_API_KEY, plus SEARXNG_URL
+    and/or FIRECRAWL_API_KEY for search."""
+    env = os.environ if env is None else env
+    key = env.get("GEMINI_API_KEY")
+    if not key:
+        raise SystemExit("set GEMINI_API_KEY (get one at https://aistudio.google.com/apikey)")
+    search_key, searxng_url = env.get("FIRECRAWL_API_KEY") or None, env.get("SEARXNG_URL") or None
+    if not (search_key or searxng_url):
+        raise SystemExit("set SEARXNG_URL (a local SearXNG: deploy/searxng.sh) and/or FIRECRAWL_API_KEY"
+                         " (https://www.firecrawl.dev/app/api-keys): Gemini reads the pages a search finds")
+    return Client(Fetcher(data_dir, min_interval=MIN_INTERVAL),
+                  Fetcher(data_dir, min_interval=SEARCH_INTERVAL),
+                  Fetcher(data_dir, min_interval=PAGE_INTERVAL),
+                  key, search_key, model=model or env.get("GEMINI_MODEL") or None,
+                  searxng_url=searxng_url, searxng_fetcher=Fetcher(data_dir, min_interval=SEARXNG_INTERVAL))
+
+
+def searxng_results(raw: dict) -> tuple[list[dict], list[str]]:
+    """(results, engines reported down) from a SearXNG JSON answer."""
+    results = [{"url": x["url"], "title": x.get("title") or "", "description": x.get("content") or ""}
+               for x in raw.get("results") or [] if isinstance(x, dict) and x.get("url")]
+    down = [e[0] for e in raw.get("unresponsive_engines") or [] if isinstance(e, list) and e]
+    return results[:SEARCH_RESULTS], down
 
 
 def search_results(raw: dict) -> list[dict]:
@@ -546,7 +622,10 @@ class Run:
         self.max_requests, self.max_credits = max_requests, max_credits
         self.monthly, self.max_acts = monthly_credits, max_acts
         self.model = client.model or MODEL
-        self.stats = {"model": self.model, "tours": 0, "shows": 0, "searches": 0, "credits": 0,
+        self.searxng_on = bool(getattr(client, "searxng_url", None))
+        self.searxng_fails = 0
+        self.firecrawl_on = getattr(client, "has_firecrawl", True)
+        self.stats = {"model": self.model, "tours": 0, "shows": 0, "searches": 0, "searxng": 0, "credits": 0,
                       "pages": 0, "gemini_calls": 0, "tokens": 0, "specific": 0, "page_only": 0,
                       "not_found": 0, "festival": 0, "discovered": 0, "skipped": 0, "errors": 0, "stopped": None}
         self.pages: dict[str, dict] = {}      # url -> {"url", "text", "words"}; fetched once per run
@@ -566,7 +645,9 @@ class Run:
                    DAILY_LIMIT - state.requests_today(self.conn, SOURCE))
 
     def can_afford(self, searches: int) -> bool:
-        return self.credits_left() >= searches * SEARCH_CREDITS and self.calls_left() >= 1
+        if self.calls_left() < 1:
+            return False
+        return self.searxng_on or (self.firecrawl_on and self.credits_left() >= searches * SEARCH_CREDITS)
 
     # requests
     def call(self, send, name: str):
@@ -587,6 +668,41 @@ class Run:
             self.sleep(wait)
 
     def search(self, query: str) -> list[dict]:
+        """SearXNG while it answers, else Firecrawl."""
+        if self.searxng_on:
+            results = self.search_searxng(query)
+            if results is not None:
+                return results
+        if not self.firecrawl_on:
+            raise Stop("SearXNG isn't answering and there is no FIRECRAWL_API_KEY")
+        if self.credits_left() < SEARCH_CREDITS:
+            raise Stop("budget spent")
+        return self.search_firecrawl(query)
+
+    def search_searxng(self, query: str) -> list[dict] | None:
+        """Results (maybe none), or None when SearXNG failed: an error, or no results
+        with engines down. SEARXNG_MAX_FAILS in a row switch it off for the run."""
+        db.begin_write(self.conn)
+        state.record_usage(self.conn, SEARXNG)
+        self.conn.commit()
+        self.stats["searches"] += 1
+        self.stats["searxng"] += 1
+        try:
+            resp = self.client.searxng(query)
+            results, down = searxng_results(resp.json()) if resp.status == 200 else ([], [f"HTTP {resp.status}"])
+        except (requests.RequestException, ValueError) as e:
+            results, down = [], [type(e).__name__]
+        if results or not down:
+            self.searxng_fails = 0
+            return results
+        self.searxng_fails += 1
+        self.log(f"  searxng: no results, down: {', '.join(down)}")
+        if self.searxng_fails >= SEARXNG_MAX_FAILS:
+            self.searxng_on = False
+            self.log(f"  searxng: {SEARXNG_MAX_FAILS} failed searches in a row, using Firecrawl from here")
+        return None
+
+    def search_firecrawl(self, query: str) -> list[dict]:
         db.begin_write(self.conn)
         state.record_usage(self.conn, SEARCH, SEARCH_CREDITS)
         self.conn.commit()
@@ -691,6 +807,20 @@ class Run:
         self.discover(tour, others, all_texts)
         self.conn.commit()
 
+    def canonical(self, name: str) -> str:
+        """A social-media handle the model copied ("@flatwormsband") as the graph
+        artist it stands for ("Flat Worms"); other names unchanged."""
+        n = name.strip().lstrip("@")
+        if " " in n:
+            return n
+        key = norm(n).replace(" ", "")
+        for k in [key] + [key[:-len(s)] for s in HANDLE_SUFFIXES if key.endswith(s) and len(key) > len(s) + 2]:
+            row = self.conn.execute("SELECT name FROM artists WHERE in_graph = 1"
+                                    " AND replace(name_norm, ' ', '') = ? LIMIT 1", (k,)).fetchone()
+            if row:
+                return row["name"]
+        return n
+
     def judge(self, show: dict, ans: dict | None, texts: list[dict]) -> dict:
         """Which acts of an answer hold up against the texts, and how firmly."""
         out = {"specific": False, "acts": [], "quote": None, "url": None, "dropped": [], "festival": False}
@@ -708,7 +838,10 @@ class Run:
             if specific and mentions(qwords, name):
                 out["acts"].append((name, role, pos, "specific", src["url"]))
             else:
-                page = next((t for t in show_pages if mentions(t["words"], name)), None)
+                # Named near the artist or the show's date, not just anywhere on a page
+                # that also mentions the venue (a venue's calendar lists everyone).
+                anchors = [show["lead"]] + date_forms(show["date"])
+                page = next((t for t in show_pages if near(t["words"], name, anchors)), None)
                 if page:
                     out["acts"].append((name, role, pos, "page", page["url"]))
                 else:
@@ -737,7 +870,8 @@ class Run:
             extra = {"model": self.model, "prompt_version": PROMPT_VERSION, "check": check,
                      **({"festival": True} if r["festival"] else {}),
                      **({"quote": r["quote"][:500]} if check == "specific" and r["quote"] else {})}
-            aid = show["lead_id"] if norm(name) == norm(show["lead"]) else ledger.get_or_create_artist(self.conn, name)
+            aid = show["lead_id"] if norm(name) == norm(show["lead"]) else \
+                ledger.get_or_create_artist(self.conn, self.canonical(name))
             ledger.add_claim(self.conn, show["id"], aid, SOURCE, key, role=role, confidence=conf,
                              position=pos, url=url, extra=extra, resolve=False)
         ledger.resolve_show(self.conn, show["id"])     # a festival flag on a claim marks the show
@@ -778,9 +912,12 @@ class Run:
                     f" {k} " in qwords for k in show_keys(cand, numeric=True, city=False) if k != norm(o["venue"])):
                 self.log(f"    other show {o['date']} {o['venue']}: quote not verified, skipped")
                 continue
-            if not date_confirmed(o["quote"], o["date"], [artist, o["headliner"] or ""] + o["openers"]):
-                # A listing without the year (or weekday) may be any year's tour.
-                self.log(f"    other show {o['date']} {o['venue']}: year not in the quote, skipped")
+            names = [artist, o["headliner"] or ""] + o["openers"]
+            if not date_confirmed(o["quote"], o["date"], names) and (
+                    date_contradicted(o["quote"], o["date"], names)
+                    or not year_from_context(src["words"], o["quote"], o["date"])):
+                # A listing without the year (in it, or above it on the page) may be any year's tour.
+                self.log(f"    other show {o['date']} {o['venue']}: year not pinned down, skipped ({o['quote'][:60]!r})")
                 continue
             # The artist named in the quote, or at the top of the page (a tour page's title).
             if not (mentions(qwords, artist) or mentions(_padded(src.get("text", "")[:300]), artist)
@@ -808,7 +945,8 @@ class Run:
                 in_quote = mentions(qwords, name)
                 if not (in_quote or norm(name) == norm(artist)):
                     continue                            # an act the quote doesn't name: not trusted
-                aid = lead_id if norm(name) == norm(artist) else ledger.get_or_create_artist(self.conn, name)
+                aid = lead_id if norm(name) == norm(artist) else \
+                    ledger.get_or_create_artist(self.conn, self.canonical(name))
                 ledger.add_claim(self.conn, show_id, aid, SOURCE, native, role=role,
                                  confidence=CONF_SPECIFIC if in_quote else CONF_PAGE,
                                  position=pos if role != "unknown" else None, url=src["url"],
