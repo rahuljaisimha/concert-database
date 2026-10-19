@@ -161,9 +161,10 @@ an act from the MusicSceneMap graph and at most `GEMINI_MAX_ACTS` acts listed
 first, then the most recent shows (pages about them are easiest to find).
 
 Gemini's own Google Search grounding isn't on the free tier for current models,
-so the search is done here, with Firecrawl's search API, and Gemini (default
-`gemini-3.5-flash-lite`, no tools) only reads text we fetched. Work goes a tour
-at a time:
+so the search is done here and Gemini (default `gemini-3.5-flash-lite`, no
+tools) only reads text we fetched. Search goes to a local SearXNG
+(`SEARXNG_URL`, see below) while it answers, else to Firecrawl's search API.
+Work goes a tour at a time:
 
 1. The most urgent due show, plus the same artist's other due shows that chain
    to it with gaps of at most 14 days (up to 12 shows), is one tour.
@@ -214,6 +215,16 @@ Budgets: a run spends whatever the providers allow, as fast as their
 per-minute limits allow; each request is counted (and committed) before it is
 sent.
 
+- SearXNG (`usage` source `searxng`): a metasearch server run from source on
+  this machine (`deploy/searxng.sh install`; `deploy/run-gemini.sh` starts and
+  stops it). It scrapes Google (its "cse" endpoint) and Brave, the only engines
+  that gave usable gig results from a home connection (Bing ignores quoted
+  phrases; Mojeek and DuckDuckGo refuse; `deploy/searxng-settings.yml`). Free
+  and uncapped, but Google flagged "unusual traffic" after ~100 searches a few
+  seconds apart in one afternoon and Brave suspends for 3 minutes after a few
+  in a row, so searches go 15 s apart, and after 3 searches in a row with no
+  results and engines down the run moves to Firecrawl. Scraping search engines
+  is against their terms; Firecrawl and Gemini are the sanctioned path.
 - Firecrawl (`usage` source `firecrawl`, in credits; a 10-result search costs
   2; the free plan has 1,000 a month): searches 6.5 s apart (free plan: 10 a
   minute). HTTP 402 (out of credits) ends the run. Optional caps:
@@ -231,8 +242,16 @@ sent.
 - `concertdb gemini` is its own process with its own lock
   (`ledger.gemini.lock`), next to `run` and `pollstar`; it commits before every
   request and holds the write lock only while storing (see "Concurrency").
-- Search results (`data/raw/firecrawl/`) and Gemini answers
-  (`data/raw/gemini/`) are archived; fetched pages are not.
+- Search results (`data/raw/searxng/`, `data/raw/firecrawl/`) and Gemini
+  answers (`data/raw/gemini/`) are archived; fetched pages are not.
+
+Known cases: `concertdb/gemini_cases.json` lists shows whose bills we know (Ty
+Segall's Australian tour, Iguana Death Cult at Zebulon, Osees at Club Soda,
+Ferris Wheelers and Le Transbordeur, FYF 2017 as a festival).
+`concertdb gemini-eval [--case NAME]` runs the step on them for real in a
+throwaway database (`data/eval/`, ~10 Gemini calls) and scores what it found;
+`tests/test_gemini.py` replays the Ty Segall case offline from captured search
+answers and the promoter's tour page.
 
 ## Roadmap
 

@@ -91,8 +91,10 @@ Windows Task Scheduler.
    in `data/pollstar.log`). They run side by side; see "Concurrency" in
    docs/ARCHITECTURE.md.
    A third task, `concert-database-gemini`, starts at 1 am (`deploy/run-gemini.sh`,
-   log in `data/gemini.log`; it exits quickly when `GEMINI_API_KEY` or
-   `FIRECRAWL_API_KEY` isn't set).
+   log in `data/gemini.log`; it exits quickly when `GEMINI_API_KEY` isn't set,
+   or neither `SEARXNG_URL` nor `FIRECRAWL_API_KEY` is). For the free search,
+   run `deploy/searxng.sh install` once and set `SEARXNG_URL` in `.env`; the
+   task starts SearXNG for the run and stops it after.
    The 1 am start is in the PC's own time; the Gemini step's budget follows
    the Pacific day whatever the time zone, so the start time only matters for
    using a fresh quota early.
