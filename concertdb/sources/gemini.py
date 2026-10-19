@@ -568,7 +568,7 @@ def daily_quota_spent(resp) -> bool:
 # ------------------------------------------------------------- scheduling
 
 def queue_shows(conn: sqlite3.Connection, max_acts: int = MAX_ACTS) -> int:
-    """Past non-festival shows with a graph artist and at most max_acts acts.
+    """Past non-festival shows with a MusicBrainz artist and at most max_acts acts.
 
     Shows by artists you prioritized come first, then the most recent: pages
     about recent shows are the easiest to find (and well-connected artists with
@@ -580,7 +580,7 @@ def queue_shows(conn: sqlite3.Connection, max_acts: int = MAX_ACTS) -> int:
         " JOIN billings b ON b.show_id = s.id JOIN artists a ON a.id = b.artist_id"
         " LEFT JOIN crawl_state cs ON cs.source = 'setlistfm' AND cs.key = 'artist:' || a.id"
         " WHERE s.date < ? AND s.status NOT IN ('cancelled', 'postponed') AND s.is_festival = 0"
-        " AND a.in_graph = 1"
+        " AND a.mbid IS NOT NULL"
         " AND (SELECT COUNT(*) FROM billings b2 WHERE b2.show_id = s.id) <= ?"
         " GROUP BY s.id", (today.isoformat(), max_acts)).fetchall()
     epoch = date(2000, 1, 1)
@@ -601,9 +601,9 @@ def _show(conn: sqlite3.Connection, show_id: int) -> dict | None:
     if s is None:
         return None
     bill = conn.execute(
-        "SELECT a.id, a.name, a.in_graph FROM billings b JOIN artists a ON a.id = b.artist_id"
+        "SELECT a.id, a.name, a.mbid FROM billings b JOIN artists a ON a.id = b.artist_id"
         " WHERE b.show_id = ? ORDER BY b.position IS NULL, b.position, a.name", (show_id,)).fetchall()
-    lead = next((b for b in bill if b["in_graph"]), bill[0] if bill else None)
+    lead = next((b for b in bill if b["mbid"]), bill[0] if bill else None)
     return {"id": s["id"], "date": s["date"], "venue": s["venue"], "city": s["city"],
             "country": s["country"], "is_festival": bool(s["is_festival"]), "status": s["status"],
             "acts": [b["name"] for b in bill],
@@ -947,14 +947,14 @@ class Run:
         self.conn.commit()
 
     def canonical(self, name: str) -> str:
-        """A social-media handle the model copied ("@flatwormsband") as the graph
+        """A social-media handle the model copied ("@flatwormsband") as the MusicBrainz
         artist it stands for ("Flat Worms"); other names unchanged."""
         n = name.strip().lstrip("@")
         if " " in n:
             return n
         key = norm(n).replace(" ", "")
         for k in [key] + [key[:-len(s)] for s in HANDLE_SUFFIXES if key.endswith(s) and len(key) > len(s) + 2]:
-            row = self.conn.execute("SELECT name FROM artists WHERE in_graph = 1"
+            row = self.conn.execute("SELECT name FROM artists WHERE mbid IS NOT NULL"
                                     " AND replace(name_norm, ' ', '') = ? LIMIT 1", (k,)).fetchone()
             if row:
                 return row["name"]

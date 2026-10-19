@@ -26,8 +26,8 @@ def setup(conn, case: dict) -> dict[str, int]:
     """The case's artist (in the graph) and its shows, each with only that act listed,
     as setlist.fm would have them. Returns {date: show id}."""
     aid = case.get("mbid") or f"eval:{norm(case['artist'])}"
-    conn.execute("INSERT OR IGNORE INTO artists (id, name, name_norm, mbid, in_graph) VALUES (?, ?, ?, ?, 1)",
-                 (aid, case["artist"], norm(case["artist"]), case.get("mbid")))
+    conn.execute("INSERT OR IGNORE INTO artists (id, name, name_norm, mbid) VALUES (?, ?, ?, ?)",
+                 (aid, case["artist"], norm(case["artist"]), aid))
     ids = {}
     for s in case["shows"]:
         v = ledger.get_or_create_venue(conn, s["venue"], s["city"], country=case.get("country"))

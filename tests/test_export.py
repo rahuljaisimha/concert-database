@@ -21,8 +21,8 @@ def test_opened_for_edges(conn):
     rows = export.opened_for(conn)
     edges = {(r["opener_name"], r["headliner_name"]): r["shows"] for r in rows}
     assert edges == {("Flat Worms", "Osees"): 2, ("Flat Worms", "Iguana Death Cult"): 1}
-    graph_only = export.opened_for(conn, graph_only=True)
-    assert [(r["opener_id"], r["headliner_id"]) for r in graph_only] == [(FLAT_WORMS, OSEES)]
+    known = export.opened_for(conn, known_only=True)
+    assert [(r["opener_id"], r["headliner_id"]) for r in known] == [(FLAT_WORMS, OSEES)]
 
 
 def test_cancelled_and_low_confidence_excluded(conn):

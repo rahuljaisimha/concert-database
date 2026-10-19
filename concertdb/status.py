@@ -10,7 +10,7 @@ def summary(conn: sqlite3.Connection) -> dict:
     one = lambda q, *a: conn.execute(q, a).fetchone()[0]  # noqa: E731
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     out = {
-        "artists_in_graph": one("SELECT COUNT(*) FROM artists WHERE in_graph = 1"),
+        "artists_musicbrainz": one("SELECT COUNT(*) FROM artists WHERE mbid IS NOT NULL"),
         "artists_unresolved": one("SELECT COUNT(*) FROM artists WHERE id LIKE 'name:%'"),
         "venues": one("SELECT COUNT(*) FROM venues"),
         "shows": one("SELECT COUNT(*) FROM shows"),
@@ -22,7 +22,9 @@ def summary(conn: sqlite3.Connection) -> dict:
             "SELECT COUNT(DISTINCT b.artist_id) FROM billings b JOIN artists a ON a.id = b.artist_id"
             " WHERE a.type = 'group' AND b.show_id IN"
             " (SELECT show_id FROM billings WHERE role = 'opener')"),
-        "groups_in_graph": one("SELECT COUNT(*) FROM artists WHERE in_graph = 1 AND type = 'group'"),
+        "groups_with_shows": one(
+            "SELECT COUNT(DISTINCT b.artist_id) FROM billings b JOIN artists a ON a.id = b.artist_id"
+            " WHERE a.type = 'group' AND a.mbid IS NOT NULL"),
         "claims_by_source": dict(conn.execute(
             "SELECT source, COUNT(*) FROM claims GROUP BY source").fetchall()),
         "setlistfm_deep_pending": one(
@@ -47,15 +49,15 @@ def summary(conn: sqlite3.Connection) -> dict:
 
 
 def format_summary(s: dict) -> str:
-    g = s["groups_in_graph"] or 1
+    g = s["groups_with_shows"] or 1
     lines = [
-        f"Artists in graph:     {s['artists_in_graph']:,}  (+{s['artists_unresolved']:,} seen in listings, not matched)",
+        f"Artists (MusicBrainz): {s['artists_musicbrainz']:,}  (+{s['artists_unresolved']:,} seen in listings, not matched)",
         f"Venues:               {s['venues']:,}",
         f"Shows:                {s['shows']:,}",
         f"  with an opener:     {s['shows_with_opener']:,}",
         f"  single act listed:  {s['single_act_shows']:,}  (opener may be missing)",
         f"Groups with ≥1 show with a known opener: {s['groups_with_known_opener_show']:,}"
-        f" / {s['groups_in_graph']:,} ({100 * s['groups_with_known_opener_show'] / g:.1f}%)",
+        f" / {s['groups_with_shows']:,} with shows ({100 * s['groups_with_known_opener_show'] / g:.1f}%)",
         f"Claims by source:     {s['claims_by_source']}",
         f"Spend this month:     ${s['usd_this_month']:.2f}",
         "Crawl state:",
