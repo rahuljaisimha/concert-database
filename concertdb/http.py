@@ -105,8 +105,10 @@ class Fetcher:
         body: dict,
         headers: dict | None = None,
         timeout: float = 120,
+        keep_raw: bool | None = None,
     ) -> Response:
-        """POST a JSON body. Successful responses are archived with the request body."""
+        """POST a JSON body. Successful responses are archived with the request body
+        (keep_raw=False: not; the caller may archive a trimmed copy with archive())."""
         self._pace()
         r = self.session.post(url, json=body, headers=headers or {}, timeout=timeout)
         resp = Response(
@@ -117,7 +119,7 @@ class Fetcher:
             content_hash=content_hash(r.text) if r.status_code == 200 else None,
             retry_after=_retry_after(r.headers.get("Retry-After")),
         )
-        if r.status_code == 200:
+        if r.status_code == 200 and (self.keep_raw if keep_raw is None else keep_raw):
             self.archive(source, r.url, body, r.text)
         return resp
 

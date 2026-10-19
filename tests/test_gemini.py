@@ -624,7 +624,7 @@ def test_no_search_left_ends_the_run(conn):
     ty_tour(conn)
     client = SearxClient([], searx={"Ty Segall": searx(down=("google cse",))}, firecrawl=False)
     stats = gemini.ask(conn, client, **QUIET)
-    assert stats["stopped"].startswith("SearXNG isn't answering") and len(state.due(conn, "gemini")) == 3
+    assert stats["stopped"].startswith("no search left") and len(state.due(conn, "gemini")) == 3
 
 
 def test_client_needs_some_search(tmp_path):
@@ -681,3 +681,108 @@ def test_ty_segall_australia_2026_from_captured_pages(conn):
     plains = conn.execute("SELECT is_festival FROM shows s JOIN venues v ON v.id = s.venue_id"
                           " WHERE v.name = 'Golden Plains'").fetchone()
     assert plains and plains[0] == 1
+
+
+# ------------------------------------------------------------------ context.dev
+
+class CtxClient(SearxClient):
+    """SearxClient plus context.dev: ctx[substring] -> Response (or a list of them)."""
+    search_order = ("contextdev", "searxng")
+
+    def __init__(self, answers, ctx=None, **kw):
+        super().__init__(answers, **kw)
+        self.ctx = ctx or {}
+        self.ctx_queries = []
+        self.has_contextdev = True
+
+    def contextdev(self, query):
+        self.ctx_queries.append(query)
+        for k, v in self.ctx.items():
+            if k in query:
+                if isinstance(v, list):
+                    v = v.pop(0) if len(v) > 1 else v[0]
+                return v
+        return ok(json.dumps({"results": [], "key_metadata": {"credits_consumed": 2, "credits_remaining": 100}}))
+
+
+def ctx(*results, remaining=100, highlights=None):
+    """A context.dev answer: (url, title, description, markdown) per result; highlights: {url: [passages]}."""
+    highlights = highlights or {}
+    return ok(json.dumps({"results": [
+        {"url": u, "title": t, "description": d, "relevance": "high",
+         "markdown": {"markdown": m or None, "code": "SUCCESS" if m else "NOT_REQUESTED"},
+         "highlights": {"highlights": highlights.get(u), "code": "SUCCESS" if u in highlights else "NOT_REQUESTED"}}
+        for u, t, d, m in results], "key_metadata": {"credits_consumed": 2, "credits_remaining": remaining}}))
+
+
+def test_contextdev_first_and_its_page_text_saves_fetching(conn):
+    ty_tour(conn)
+    c = ty_client()
+    tour_md = gemini.page_text(TOUR_PAGE)
+    metro_md = gemini.page_text(METRO_PAGE)
+    client = CtxClient(c.answers, ctx={
+        "tour support": ctx((TOUR_URL, "Ty Segall Australian Tour", "Earth Tongue on all dates", tour_md)),
+        '"The Metro" Sydney': ctx((METRO_URL, "Ty Segall - The Metro", "Monday 2 March", metro_md))})
+    stats = gemini.ask(conn, client, **QUIET)
+    assert stats["specific"] == 3 and stats["contextdev"] == 3 and stats["searxng"] == 0
+    assert client.fetched == [] and client.queries == []           # pages came with the search; no Firecrawl
+    assert state.requests_today(conn, "contextdev") == 6            # credits: 2 a search
+
+
+def test_contextdev_highlights_stand_in_for_pages_we_cant_fetch(conn):
+    show = ty_show(conn, "2025-10-19", "Ferris Wheelers", "Dallas", OTHER, "Osees")
+    fb = "https://www.facebook.com/events/ferris-wheelers/osees-w-dmbq/1"
+    passage = "OSEES w/ DMBQ at Ferris Wheelers Backyard & BBQ, Sunday October 19, 2025. Doors 7pm."
+    answer_ = answer({"shows": [{"date": "2025-10-19", "headliner": "Osees", "openers": ["DMBQ"],
+                                 "show_specific_quote": passage, "url": fb}]})
+    client = CtxClient([answer_], ctx={"Ferris Wheelers": ctx((fb, "OSEES w/ DMBQ", "Event by Ferris Wheelers", ""),
+                                                              highlights={fb: [passage]})})
+    stats = gemini.ask(conn, client, **QUIET)
+    assert client.fetched == [fb] and stats["specific"] == 1      # the fetch failed; the passage was used
+    assert billing(conn, show)["DMBQ"][0] == "opener"
+
+
+def test_contextdev_out_of_credits_hands_over_to_searxng(conn):
+    ty_tour(conn)
+    c = ty_client()
+    client = CtxClient(c.answers, ctx={"Ty Segall": Response(402, '{"error": "Insufficient credits"}', None, None, None)},
+                       searx={"tour support": searx((TOUR_URL, "Ty Segall Australian Tour", "")),
+                              '"The Metro" Sydney': searx((METRO_URL, "Ty Segall - The Metro", ""))},
+                       pages=c.pages)
+    stats = gemini.ask(conn, client, **QUIET)
+    assert len(client.ctx_queries) == 1                            # switched off after the first 402
+    assert stats["specific"] == 3 and stats["searxng"] == 3
+
+
+def test_contextdev_answers_are_archived_without_page_text(tmp_path):
+    import gzip
+    from concertdb.http import Fetcher
+
+    class FakeSession:
+        headers = {}
+
+        def post(self, url, json=None, headers=None, timeout=None):
+            assert headers["Authorization"] == "Bearer ctx-key"
+
+            class R:
+                status_code, headers = 200, {}
+                text = ctx((TOUR_URL, "Tour", "dates", "LOTS OF PAGE TEXT " * 100),
+                           highlights={TOUR_URL: ["A PASSAGE " * 50]}).text
+            R.url = url
+            return R()
+
+    f = Fetcher(tmp_path, session=FakeSession())
+    client = gemini.Client(f, f, f, "g", None, contextdev_key="ctx-key")
+    resp = client.contextdev("Ty Segall tour")
+    assert "LOTS OF PAGE TEXT" in resp.text                         # the caller gets the page text
+    archived = gzip.open(next((tmp_path / "raw" / "contextdev").glob("*.jsonl.gz")), "rt").read()
+    assert "Ty Segall tour" in archived and "ctx-key" not in archived
+    assert "LOTS OF PAGE TEXT" not in archived and "A PASSAGE" not in archived and "SUCCESS" in archived
+
+
+def test_search_order_from_env(tmp_path):
+    env = {"GEMINI_API_KEY": "k", "CONTEXT_DEV_API_KEY": " c \n", "SEARXNG_URL": "http://127.0.0.1:8888"}
+    c = gemini.client_from_env(tmp_path, env=env)
+    assert c.has_contextdev and c.search_order == ("contextdev", "searxng")
+    c = gemini.client_from_env(tmp_path, env={**env, "SEARCH_ORDER": "searxng,contextdev"})
+    assert c.search_order == ("searxng", "contextdev")

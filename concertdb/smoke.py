@@ -108,6 +108,6 @@ def _gemini(conn, client, log) -> tuple[bool, str]:
         (gemini.SOURCE, show, norm(TEST_ARTIST))).fetchone()
     if row:
         check = json.loads(row["extra"])["check"]
-        return True, (f"{stats['model']}: {TEST_ARTIST} found ({check}), {stats['searches']} search ({'searxng' if stats['searxng'] else 'firecrawl'}),"
+        return True, (f"{stats['model']}: {TEST_ARTIST} found ({check}), {stats['searches']} search ({'context.dev' if stats.get('contextdev') else 'searxng' if stats['searxng'] else 'firecrawl'}),"
                       f" {stats['pages']} pages, {stats['tokens']:,} tokens")
     return False, f"{stats.get('model')}: {TEST_ARTIST} not found {stats}"
