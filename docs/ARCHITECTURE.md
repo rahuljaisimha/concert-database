@@ -167,8 +167,9 @@ first, then the most recent shows (pages about them are easiest to find).
 
 Gemini's own Google Search grounding isn't on the free tier for current models,
 so the search is done here and Gemini (default `gemini-3.5-flash-lite`, no
-tools) only reads text we fetched. Search goes to a local SearXNG
-(`SEARXNG_URL`, see below) while it answers, else to Firecrawl's search API.
+tools) only reads text we fetched. Search goes, in `SEARCH_ORDER` (default
+`contextdev,searxng`), to context.dev's search API and a local SearXNG, each
+while it answers, then to Firecrawl's search API.
 Work goes a tour at a time:
 
 1. The most urgent due show, plus the same artist's other due shows that chain
@@ -220,6 +221,17 @@ Budgets: a run spends whatever the providers allow, as fast as their
 per-minute limits allow; each request is counted (and committed) before it is
 sent.
 
+- context.dev (`usage` source `contextdev`, in credits): a 10-result search
+  costs 1 credit, plus 1 for highlights (the passages relevant to the query),
+  so 2 (recorded from `key_metadata.credits_consumed`); full page text would
+  be +1 per result, so it isn't asked for. 6.5 s apart (free plan: 10 a
+  minute). Pages are still fetched by us; one we can't fetch (Facebook event
+  pages) is read from its highlights. The archive keeps the answer without
+  page text. Tried on the
+  known cases: good for one-show searches (Facebook events "Osees w/ DMBQ",
+  "OSEES + OVER-GAIN OPTIMAL DEATH"), weak for the quoted venue-list search.
+  Out of credits (HTTP 401/402/403 or `credits_remaining` 0) or 3 failures in
+  a row switch it off for the run.
 - SearXNG (`usage` source `searxng`): a metasearch server run from source on
   this machine (`deploy/searxng.sh install`; `deploy/run-gemini.sh` starts and
   stops it). It scrapes Google (its "cse" endpoint) and Brave, the only engines
@@ -247,8 +259,9 @@ sent.
 - `concertdb gemini` is its own process with its own lock
   (`ledger.gemini.lock`), next to `run` and `pollstar`; it commits before every
   request and holds the write lock only while storing (see "Concurrency").
-- Search results (`data/raw/searxng/`, `data/raw/firecrawl/`) and Gemini
-  answers (`data/raw/gemini/`) are archived; fetched pages are not.
+- Search results (`data/raw/contextdev/`, `data/raw/searxng/`,
+  `data/raw/firecrawl/`) and Gemini answers (`data/raw/gemini/`) are archived;
+  page text is not.
 
 Known cases: `concertdb/gemini_cases.json` lists shows whose bills we know (Ty
 Segall's Australian tour, Iguana Death Cult at Zebulon, Osees at Club Soda,

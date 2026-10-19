@@ -75,7 +75,7 @@ def _score_show(conn, show_id, s: dict, artist: str, discovered: bool = False) -
 def run(data_dir: Path, names=None, log=print) -> dict:
     work = Path(data_dir) / "eval"
     totals = {"cases": 0, "expected": 0, "found": 0, "extra": 0, "festival_ok": 0, "festival_cases": 0,
-              "searches": 0, "searxng": 0, "credits": 0, "gemini_calls": 0, "tokens": 0}
+              "searches": 0, "contextdev": 0, "searxng": 0, "credits": 0, "gemini_calls": 0, "tokens": 0}
     client = gemini.client_from_env(work)
     for case in load_cases(names):
         if work.exists():
@@ -87,7 +87,7 @@ def run(data_dir: Path, names=None, log=print) -> dict:
         conn.commit()
         log(f"== {case['name']}")
         stats = gemini.ask(conn, client, max_requests=12, max_credits=24, log=log)
-        for k in ("searches", "searxng", "credits", "gemini_calls", "tokens"):
+        for k in ("searches", "contextdev", "searxng", "credits", "gemini_calls", "tokens"):
             totals[k] += stats.get(k) or 0
         totals["cases"] += 1
         for r in score(conn, case, ids):
@@ -102,7 +102,8 @@ def run(data_dir: Path, names=None, log=print) -> dict:
             log(f"   {r['date']} {r['venue']}: found {r['found'] or '-'} {r.get('checks') or ''}"
                 + (f" MISSING {r['missing']}" if r["missing"] else "")
                 + (f" EXTRA {r['extra']}" if r["extra"] else "") + flag)
-        log(f"   {stats.get('searches')} searches ({stats.get('searxng')} SearXNG), "
+        log(f"   {stats.get('searches')} searches ({stats.get('contextdev')} context.dev,"
+            f" {stats.get('searxng')} SearXNG), "
             f"{stats.get('gemini_calls')} Gemini calls" + (f", stopped: {stats['stopped']}" if stats.get("stopped") else ""))
         conn.close()
     return totals

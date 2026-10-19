@@ -2,9 +2,11 @@
 
 Gemini's own Google Search grounding isn't on the free tier for current
 models, so the searching is done here and Gemini (no tools) only reads text we
-fetched ourselves. Search goes to a local SearXNG (SEARXNG_URL; free, no cap;
-deploy/searxng.sh runs it) when there is one, else, or when it stops
-answering, to Firecrawl's search API. Work goes by tour, not show:
+fetched ourselves. Search goes, in SEARCH_ORDER, to context.dev's search API
+(CONTEXT_DEV_API_KEY; 2 credits a search with highlights: the passages of each
+result relevant to the query, which also reach Facebook event pages) and a local SearXNG (SEARXNG_URL; free;
+deploy/searxng.sh runs it), each until it stops answering or runs out, then to
+Firecrawl's search API. Work goes by tour, not show:
 
   1. Take the most urgent due show, and the same artist's other due shows that
      chain to it with gaps of at most TOUR_GAP_DAYS (up to TOUR_MAX_SHOWS).
@@ -31,6 +33,13 @@ Claims (source "gemini", weight 0.6):
 Budgets: spend what the providers allow, as fast as their per-minute limits
 allow. Every request is counted (and committed) before it is sent, so a crash
 can't hide spent quota.
+  - context.dev (usage source "contextdev", in credits): searches
+    CONTEXTDEV_INTERVAL apart (free plan: 10 a minute, 2 at once), with
+    highlights (the passages relevant to the query: 2 credits a search). A
+    page we can't fetch ourselves (Facebook events) is read from its
+    highlights. Out of credits (HTTP 401/402/403, or credits_remaining 0) or 3
+    failures in a row switch it off for the run. Only a trimmed answer (no page
+    text) is archived.
   - SearXNG (usage source "searxng", in searches): searches SEARXNG_INTERVAL
     apart. It scrapes the search engines it is set to use (deploy/searxng-
     settings.yml), which may block it: after SEARXNG_MAX_FAILS searches in a
@@ -72,6 +81,11 @@ PAGES = "gemini-pages"      # source name for page fetches (not archived)
 API = "https://generativelanguage.googleapis.com/v1beta"
 SEARCH_API = "https://api.firecrawl.dev/v2/search"
 SEARXNG = "searxng"         # usage source for SearXNG searches; responses archived here
+CONTEXTDEV = "contextdev"   # usage source for context.dev credits; trimmed responses archived here
+CONTEXTDEV_API = "https://api.context.dev/v1/web/search"
+CONTEXTDEV_INTERVAL = 6.5   # free plan: 10 requests a minute
+CONTEXTDEV_HIGHLIGHT_CHARS = 2000   # highlights: the passages relevant to the query, +1 credit per 10 results
+SEARCH_ORDER = ("contextdev", "searxng")   # then Firecrawl; SEARCH_ORDER in .env changes it
 SEARXNG_INTERVAL = 15.0     # between SearXNG searches: Google flagged "unusual traffic" after ~100
                             # searches a few seconds apart in an afternoon
 SEARXNG_MAX_FAILS = 3       # empty searches in a row (engines down) before falling back to Firecrawl
@@ -410,7 +424,9 @@ def quote_source(quote: str | None, texts: list[dict]) -> dict | None:
 class Client:
     def __init__(self, fetcher: Fetcher, search_fetcher: Fetcher, page_fetcher: Fetcher,
                  key: str, search_key: str | None, model: str | None = None,
-                 searxng_url: str | None = None, searxng_fetcher: Fetcher | None = None):
+                 searxng_url: str | None = None, searxng_fetcher: Fetcher | None = None,
+                 contextdev_key: str | None = None, contextdev_fetcher: Fetcher | None = None,
+                 search_order=SEARCH_ORDER):
         self.fetcher = fetcher
         self.search_fetcher = search_fetcher
         self.page_fetcher = page_fetcher
@@ -419,6 +435,32 @@ class Client:
         self.model = model or MODEL
         self.searxng_url = searxng_url.rstrip("/") if searxng_url else None
         self.searxng_fetcher = searxng_fetcher or search_fetcher
+        self.contextdev_headers = {"Authorization": f"Bearer {contextdev_key}"} if contextdev_key else None
+        self.contextdev_fetcher = contextdev_fetcher or search_fetcher
+        self.search_order = tuple(search_order)
+
+    @property
+    def has_contextdev(self) -> bool:
+        return self.contextdev_headers is not None
+
+    def contextdev(self, query: str):
+        """Search; the answer carries each result page's markdown. Archived without it
+        (10 pages of text per search would be most of the archive)."""
+        body = {"query": query, "numResults": SEARCH_RESULTS,
+                "highlightsOptions": {"enabled": True, "maxCharacters": CONTEXTDEV_HIGHLIGHT_CHARS}}
+        resp = self.contextdev_fetcher.post_json(CONTEXTDEV, CONTEXTDEV_API, body,
+                                                 headers=self.contextdev_headers, timeout=90, keep_raw=False)
+        if resp.status == 200:
+            try:
+                raw = resp.json()
+                for r in raw.get("results") or []:
+                    for k in ("markdown", "highlights"):       # keep the status code, drop the text
+                        if isinstance(r.get(k), dict):
+                            r[k] = {"code": r[k].get("code")}
+                self.contextdev_fetcher.archive(CONTEXTDEV, CONTEXTDEV_API, body, json.dumps(raw))
+            except (ValueError, AttributeError):
+                pass
+        return resp
 
     @property
     def has_firecrawl(self) -> bool:
@@ -450,15 +492,19 @@ def client_from_env(data_dir, model: str | None = None, env=None) -> "Client":
     key = env.get("GEMINI_API_KEY")
     if not key:
         raise SystemExit("set GEMINI_API_KEY (get one at https://aistudio.google.com/apikey)")
-    search_key, searxng_url = env.get("FIRECRAWL_API_KEY") or None, env.get("SEARXNG_URL") or None
-    if not (search_key or searxng_url):
-        raise SystemExit("set SEARXNG_URL (a local SearXNG: deploy/searxng.sh) and/or FIRECRAWL_API_KEY"
-                         " (https://www.firecrawl.dev/app/api-keys): Gemini reads the pages a search finds")
+    search_key, searxng_url = (env.get("FIRECRAWL_API_KEY") or "").strip() or None, env.get("SEARXNG_URL") or None
+    contextdev_key = (env.get("CONTEXT_DEV_API_KEY") or "").strip() or None
+    if not (search_key or searxng_url or contextdev_key):
+        raise SystemExit("set CONTEXT_DEV_API_KEY, SEARXNG_URL (a local SearXNG: deploy/searxng.sh) and/or"
+                         " FIRECRAWL_API_KEY: Gemini reads the pages a search finds")
+    order = [b.strip() for b in (env.get("SEARCH_ORDER") or ",".join(SEARCH_ORDER)).split(",") if b.strip()]
     return Client(Fetcher(data_dir, min_interval=MIN_INTERVAL),
                   Fetcher(data_dir, min_interval=SEARCH_INTERVAL),
                   Fetcher(data_dir, min_interval=PAGE_INTERVAL),
                   key, search_key, model=model or env.get("GEMINI_MODEL") or None,
-                  searxng_url=searxng_url, searxng_fetcher=Fetcher(data_dir, min_interval=SEARXNG_INTERVAL))
+                  searxng_url=searxng_url, searxng_fetcher=Fetcher(data_dir, min_interval=SEARXNG_INTERVAL),
+                  contextdev_key=contextdev_key, contextdev_fetcher=Fetcher(data_dir, min_interval=CONTEXTDEV_INTERVAL),
+                  search_order=order)
 
 
 def searxng_results(raw: dict) -> tuple[list[dict], list[str]]:
@@ -467,6 +513,23 @@ def searxng_results(raw: dict) -> tuple[list[dict], list[str]]:
                for x in raw.get("results") or [] if isinstance(x, dict) and x.get("url")]
     down = [e[0] for e in raw.get("unresponsive_engines") or [] if isinstance(e, list) and e]
     return results[:SEARCH_RESULTS], down
+
+
+def contextdev_results(raw: dict) -> list[dict]:
+    """[{url, title, description, markdown, highlights}] from a context.dev search answer.
+    markdown: the page's text, when asked for and scraped; highlights: the passages
+    relevant to the query (both "" otherwise)."""
+    out = []
+    for x in raw.get("results") or []:
+        if not (isinstance(x, dict) and x.get("url")):
+            continue
+        md, hl = x.get("markdown"), x.get("highlights")
+        md = (md.get("markdown") if md.get("code") == "SUCCESS" else None) if isinstance(md, dict) else md
+        hl = (hl.get("highlights") if hl.get("code") == "SUCCESS" else None) if isinstance(hl, dict) else hl
+        out.append({"url": x["url"], "title": x.get("title") or "", "description": x.get("description") or "",
+                    "markdown": md if isinstance(md, str) else "",
+                    "highlights": " ... ".join(h for h in hl if isinstance(h, str)) if isinstance(hl, list) else ""})
+    return out[:SEARCH_RESULTS]
 
 
 def search_results(raw: dict) -> list[dict]:
@@ -625,10 +688,15 @@ class Run:
         self.searxng_on = bool(getattr(client, "searxng_url", None))
         self.searxng_fails = 0
         self.firecrawl_on = getattr(client, "has_firecrawl", True)
-        self.stats = {"model": self.model, "tours": 0, "shows": 0, "searches": 0, "searxng": 0, "credits": 0,
+        self.contextdev_on = getattr(client, "has_contextdev", False)
+        self.contextdev_fails = 0
+        self.order = tuple(getattr(client, "search_order", SEARCH_ORDER))
+        self.stats = {"model": self.model, "tours": 0, "shows": 0, "searches": 0, "searxng": 0,
+                      "contextdev": 0, "contextdev_credits": 0, "credits": 0,
                       "pages": 0, "gemini_calls": 0, "tokens": 0, "specific": 0, "page_only": 0,
                       "not_found": 0, "festival": 0, "discovered": 0, "skipped": 0, "errors": 0, "stopped": None}
         self.pages: dict[str, dict] = {}      # url -> {"url", "text", "words"}; fetched once per run
+        self.backup_text: dict[str, str] = {}  # url -> the search's passages from it, if fetching fails
         self.sleep = time.sleep
 
     # budgets
@@ -647,7 +715,8 @@ class Run:
     def can_afford(self, searches: int) -> bool:
         if self.calls_left() < 1:
             return False
-        return self.searxng_on or (self.firecrawl_on and self.credits_left() >= searches * SEARCH_CREDITS)
+        return self.searxng_on or self.contextdev_on or (
+            self.firecrawl_on and self.credits_left() >= searches * SEARCH_CREDITS)
 
     # requests
     def call(self, send, name: str):
@@ -668,16 +737,75 @@ class Run:
             self.sleep(wait)
 
     def search(self, query: str) -> list[dict]:
-        """SearXNG while it answers, else Firecrawl."""
-        if self.searxng_on:
-            results = self.search_searxng(query)
+        """The first search in self.order that answers (context.dev, SearXNG), else Firecrawl."""
+        for backend in self.order:
+            results = None
+            if backend == "contextdev" and self.contextdev_on:
+                results = self.search_contextdev(query)
+            elif backend == "searxng" and self.searxng_on:
+                results = self.search_searxng(query)
             if results is not None:
                 return results
         if not self.firecrawl_on:
-            raise Stop("SearXNG isn't answering and there is no FIRECRAWL_API_KEY")
+            raise Stop("no search left: SearXNG / context.dev aren't answering and there is no FIRECRAWL_API_KEY")
         if self.credits_left() < SEARCH_CREDITS:
             raise Stop("budget spent")
         return self.search_firecrawl(query)
+
+    def search_contextdev(self, query: str) -> list[dict] | None:
+        """Results (their page text kept as fetched pages), or None when context.dev
+        failed; out of credits, or 3 failures in a row, switch it off for the run."""
+        db.begin_write(self.conn)
+        state.record_usage(self.conn, CONTEXTDEV, 1)
+        self.conn.commit()
+        self.stats["searches"] += 1
+        self.stats["contextdev"] += 1
+        self.stats["contextdev_credits"] += 1
+        try:
+            resp = self.call(lambda: self.client.contextdev(query), "context.dev")
+        except Stop as e:
+            resp, why = None, str(e)
+        except requests.RequestException as e:
+            resp, why = None, type(e).__name__
+        if resp is not None and resp.status in (401, 402, 403):
+            self.contextdev_on = False
+            self.log(f"  context.dev: HTTP {resp.status} {resp.text[:200]}; switched off for this run")
+            return None
+        raw = None
+        if resp is not None and resp.status == 200:
+            try:
+                raw = resp.json()
+            except ValueError:
+                why = "not JSON"
+        elif resp is not None:
+            why = f"HTTP {resp.status} {resp.text[:120]}"
+        if raw is None:
+            self.contextdev_fails += 1
+            self.log(f"  context.dev: {why}")
+            if self.contextdev_fails >= 3:
+                self.contextdev_on = False
+                self.log("  context.dev: 3 failed searches in a row, switched off for this run")
+            return None
+        self.contextdev_fails = 0
+        meta = raw.get("key_metadata") or {}
+        used = meta.get("credits_consumed")
+        if isinstance(used, int) and used != 1:
+            db.begin_write(self.conn)
+            state.record_usage(self.conn, CONTEXTDEV, used - 1)
+            self.conn.commit()
+            self.stats["contextdev_credits"] += used - 1
+        if isinstance(meta.get("credits_remaining"), int) and meta["credits_remaining"] <= 0:
+            self.contextdev_on = False
+            self.log("  context.dev: no credits left, switched off")
+        results = contextdev_results(raw)
+        for r in results:
+            text = re.sub(r"\s+", " ", r.pop("markdown")).strip()
+            if text and r["url"] not in self.pages:
+                self.pages[r["url"]] = {"url": r["url"], "text": text, "words": _padded(text)}
+            hl = re.sub(r"\s+", " ", r.pop("highlights")).strip()
+            if hl:          # used when we can't fetch the page ourselves (Facebook, ...)
+                self.backup_text.setdefault(r["url"], hl)
+        return results
 
     def search_searxng(self, query: str) -> list[dict] | None:
         """Results (maybe none), or None when SearXNG failed: an error, or no results
@@ -699,7 +827,7 @@ class Run:
         self.log(f"  searxng: no results, down: {', '.join(down)}")
         if self.searxng_fails >= SEARXNG_MAX_FAILS:
             self.searxng_on = False
-            self.log(f"  searxng: {SEARXNG_MAX_FAILS} failed searches in a row, using Firecrawl from here")
+            self.log(f"  searxng: {SEARXNG_MAX_FAILS} failed searches in a row, switched off for this run")
         return None
 
     def search_firecrawl(self, query: str) -> list[dict]:
@@ -733,6 +861,7 @@ class Run:
                     text = page_text(r.text) if r.status == 200 else ""
                 except requests.RequestException:
                     text = ""
+                text = text or self.backup_text.get(u, "")
                 self.pages[u] = {"url": u, "text": text, "words": _padded(text)}
             if self.pages[u]["text"]:
                 out.append(self.pages[u])
