@@ -1,25 +1,29 @@
 """Live check of the search + Gemini step on shows whose bills we know
 (concertdb/gemini_cases.json). Each case runs in a throwaway database under
 data/eval/, with real searches, page fetches and Gemini calls (~1-3 per case),
-and is scored against the known bill.
+and is scored against the known bill. By default only the cases marked
+"default" run (two shows, ~2 searches and 2 Gemini calls); --all runs every one.
 
-  concertdb gemini-eval [--case NAME ...]
+  concertdb gemini-eval [--case NAME ...] [--all]
 """
 
 import json
 import shutil
 from pathlib import Path
 
-from . import db, ledger, state
+from . import db, ledger, musicbrainz, state
 from .normalize import norm
 from .sources import gemini
 
 CASES = Path(__file__).with_name("gemini_cases.json")
 
 
-def load_cases(names=None) -> list[dict]:
+def load_cases(names=None, everything: bool = False) -> list[dict]:
+    """The named cases; else all (everything) or the ones marked default."""
     cases = json.loads(CASES.read_text())["cases"]
-    return [c for c in cases if not names or c["name"] in names]
+    if names:
+        return [c for c in cases if c["name"] in names]
+    return [c for c in cases if everything or c.get("default")]
 
 
 def setup(conn, case: dict) -> dict[str, int]:
@@ -72,15 +76,18 @@ def _score_show(conn, show_id, s: dict, artist: str, discovered: bool = False) -
     return row
 
 
-def run(data_dir: Path, names=None, log=print) -> dict:
+def run(data_dir: Path, names=None, everything: bool = False, log=print) -> dict:
     work = Path(data_dir) / "eval"
     totals = {"cases": 0, "expected": 0, "found": 0, "extra": 0, "festival_ok": 0, "festival_cases": 0,
               "searches": 0, "contextdev": 0, "searxng": 0, "credits": 0, "gemini_calls": 0, "tokens": 0}
     client = gemini.client_from_env(work)
-    for case in load_cases(names):
+    mb = Path(data_dir) / musicbrainz.FILE
+    for case in load_cases(names, everything):
         if work.exists():
             shutil.rmtree(work)
         conn = db.connect(work / "eval.sqlite")
+        if mb.exists():
+            db.attach_musicbrainz(conn, mb)      # names match as they do in the real ledger
         ids = setup(conn, case)
         for sid in ids.values():
             state.ensure(conn, gemini.SOURCE, f"show:{sid}", priority=1)

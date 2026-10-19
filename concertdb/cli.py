@@ -148,7 +148,7 @@ def cmd_mb_load(args):
 
 def cmd_gemini_eval(args):
     from . import gemini_eval
-    print(gemini_eval.run(_data_dir(args), args.case or None))
+    print(gemini_eval.run(_data_dir(args), args.case or None, everything=args.all))
 
 
 def _monthly_credits() -> int | None:
@@ -217,6 +217,7 @@ def cmd_backup(args, conn=None):
 
 def cmd_restore(args):
     backup.restore(Path(args.db), _data_dir(args))
+    print("restored; run `concertdb mb-load` to rebuild data/musicbrainz.sqlite (not backed up)")
 
 
 def cmd_smoke_test(args):
@@ -324,6 +325,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("gemini-eval", help="run the search + Gemini step on shows whose bills we know"
                        " (concertdb/gemini_cases.json) in a throwaway database, and score it")
     s.add_argument("--case", action="append", help="only this case (repeatable)")
+    s.add_argument("--all", action="store_true", help="every case, not just the default two (costs more)")
     s.set_defaults(fn=cmd_gemini_eval)
 
     s = sub.add_parser("run", help="one scheduled cycle: watched pages, setlist.fm, Pollstar, backup")

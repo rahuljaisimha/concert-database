@@ -33,12 +33,45 @@ cp .env.example .env        # add your setlist.fm key and R2 credentials
 set -a; . ./.env; set +a
 
 # Load every artist from MusicSceneMap's graph (~76k, a few seconds;
-# downloads graph.db.gz from GitHub, or pass --graph <path>)
+# downloads graph.db.gz from GitHub, or pass --graph <path>). A one-time seed:
+# nothing reads the graph afterwards.
 .venv/bin/concertdb seed
+
+# MusicBrainz's artist names, for matching names from Pollstar, Gemini and pages
+# (see "MusicBrainz data" below; ~1.5 min, ~0.8 GB in data/musicbrainz.sqlite)
+.venv/bin/concertdb mb-load
 
 # Crawl the artists you care about first
 .venv/bin/concertdb prioritize "Osees" "Flat Worms" "Ty Segall"
 ```
+
+## MusicBrainz data
+
+`data/musicbrainz.sqlite` is a lookup copy of MusicBrainz's artists (3M
+artists, 3.5M names and aliases, each artist's disambiguation note). It is
+used only to match names to MusicBrainz IDs; the artists that appear in our
+data are copied into the ledger. It isn't backed up: build it on any computer
+with
+
+```bash
+.venv/bin/concertdb mb-load                 # newest full export, streamed
+.venv/bin/concertdb mb-load --dump PATH     # or a downloaded mbdump.tar.bz2
+```
+
+- Source: MusicBrainz's full data export,
+  https://data.metabrainz.org/pub/musicbrainz/data/fullexport/ (`LATEST` names
+  the newest folder; the file is `mbdump.tar.bz2`, ~7 GB, refreshed twice a
+  week). MusicBrainz's core data is public domain (CC0).
+- Nothing big is downloaded to disk: the file is read as a stream, and the two
+  tables needed (`artist`, `artist_alias`) come first in it, so ~500 MB is
+  read and the download stops. Needs network access to data.metabrainz.org,
+  ~1 GB free disk, a few hundred MB of memory.
+- The result is written to `musicbrainz.sqlite.tmp`, then renamed, so a
+  failed run leaves the old file in place. Every connection to the ledger
+  attaches it as `mb` if it exists; without it, names only match artists
+  already in the ledger.
+- Re-run it now and then (monthly is plenty) to pick up new artists and
+  aliases. After `concertdb restore` on a new machine, run it once.
 
 ## Everyday use
 
@@ -67,7 +100,7 @@ concertdb pollstar
 # (needs GEMINI_API_KEY and one of CONTEXT_DEV_API_KEY, SEARXNG_URL, FIRECRAWL_API_KEY; stops at a quota;
 # can run while `concertdb run` is running; GEMINI_MAX_ACTS / --max-acts widens it)
 concertdb gemini
-concertdb gemini-eval                 # the same, live, on shows whose bills we know
+concertdb gemini-eval                 # the same, live, on two shows whose bills we know (--all: every case)
 
 concertdb mb-load                     # MusicBrainz names/aliases for matching (now and then; a few minutes)
 concertdb status                      # coverage and progress

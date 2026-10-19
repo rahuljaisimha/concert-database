@@ -89,3 +89,60 @@ def test_old_ledgers_get_the_new_column(tmp_path):
     c.close()
     conn = db.connect(p)
     assert "disambiguation" in {r["name"] for r in conn.execute("PRAGMA table_info(artists)")}
+
+
+FUZZ_US = "00000000-0000-0000-0000-0000000000f1"     # Ty Segall's garage rock band
+FUZZ_OTHER = "00000000-0000-0000-0000-0000000000f2"
+
+
+def _dump_with_fuzz(tmp_path):
+    artists = [_artist(1, OSEES, "Osees", comment="US garage rock band"),
+               _artist(5, FUZZ_US, "Fuzz", comment="US garage rock band with Ty Segall"),
+               _artist(6, FUZZ_OTHER, "Fuzz", comment="Japanese noise rock")]
+    aliases = [["10", "1", "Thee Oh Sees", "\\N", "0", "\\N", "1", "Oh Sees, Thee"],
+               ["11", "1", "Oh Sees", "\\N", "0", "\\N", "1", "Oh Sees"],
+               ["12", "1", "OCS", "\\N", "0", "\\N", "1", "OCS"],
+               ["13", "5", "FUZZ", "\\N", "0", "\\N", "1", "FUZZ"]]
+    tsv = lambda rows: "".join("\t".join(r) + "\n" for r in rows)   # noqa: E731
+    path = tmp_path / "fuzz.tar.bz2"
+    with tarfile.open(path, "w:bz2") as tar:
+        for name, text in (("mbdump/artist", tsv(artists)), ("mbdump/artist_alias", tsv(aliases))):
+            data = text.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return str(path)
+
+
+def test_one_band_under_several_names(tmp_path):
+    """Thee Oh Sees, Oh Sees, OCS and Osees are one band: one artist, not four."""
+    conn = db.connect(tmp_path / "ledger.sqlite")
+    musicbrainz.load(conn, tmp_path / "ledger.sqlite", _dump_with_fuzz(tmp_path), log=lambda *_: None)
+    v = ledger.get_or_create_venue(conn, "Teragram Ballroom", "Los Angeles")
+    show = ledger.find_or_create_show(conn, "2015-12-16", v)
+    ledger.add_claim(conn, show, ledger.get_or_create_artist(conn, "Osees", mbid=OSEES), "setlistfm", "s1")
+    for i, name in enumerate(["Thee Oh Sees", "Oh Sees", "OCS", "osees"]):
+        assert ledger.get_or_create_artist(conn, name) == OSEES
+        ledger.add_claim(conn, show, ledger.get_or_create_artist(conn, name), "gemini", f"g{i}", role="headliner",
+                         confidence=0.8)
+    assert [r[0] for r in conn.execute("SELECT artist_id FROM billings WHERE show_id = ?", (show,))] == [OSEES]
+
+
+def test_two_bands_with_one_name(tmp_path):
+    """Two MusicBrainz artists are called Fuzz: a bare "Fuzz" isn't guessed, unless one
+    of them is already in the ledger (e.g. from setlist.fm, which sends the MBID)."""
+    conn = db.connect(tmp_path / "ledger.sqlite")
+    musicbrainz.load(conn, tmp_path / "ledger.sqlite", _dump_with_fuzz(tmp_path), log=lambda *_: None)
+    assert ledger.get_or_create_artist(conn, "Fuzz") == "name:fuzz"
+    assert ledger.get_or_create_artist(conn, "Fuzz", mbid=FUZZ_US) == FUZZ_US
+    assert ledger.get_or_create_artist(conn, "Fuzz") == FUZZ_US
+    assert conn.execute("SELECT disambiguation FROM artists WHERE id = ?", (FUZZ_US,)).fetchone()[0] == \
+        "US garage rock band with Ty Segall"
+
+
+def test_default_eval_cases_are_the_two_cheap_ones():
+    from concertdb import gemini_eval
+    assert [c["name"] for c in gemini_eval.load_cases()] == ["ty-segall-gold-coast", "iguana-death-cult-zebulon"]
+    gold = gemini_eval.load_cases(["ty-segall-gold-coast"])[0]["shows"]
+    assert len(gold) == 1 and gold[0]["openers"] == ["Earth Tongue", "Speeding Vehicle"]
+    assert len(gemini_eval.load_cases(everything=True)) == 8

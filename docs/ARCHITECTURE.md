@@ -296,12 +296,16 @@ sent.
   page text is not.
 
 Known cases: `concertdb/gemini_cases.json` lists shows whose bills we know (Ty
-Segall's Australian tour, Iguana Death Cult at Zebulon, Osees at Club Soda,
-Ferris Wheelers and Le Transbordeur, FYF 2017 as a festival).
-`concertdb gemini-eval [--case NAME]` runs the step on them for real in a
-throwaway database (`data/eval/`, ~10 Gemini calls) and scores what it found;
-`tests/test_gemini.py` replays the Ty Segall case offline from captured search
-answers and the promoter's tour page.
+Segall's Australian tour and its Gold Coast show alone, Iguana Death Cult at
+Zebulon, Osees at Club Soda, Ferris Wheelers, Le Transbordeur and the Teragram
+billed as Thee Oh Sees with Fuzz, FYF 2017 as a festival).
+`concertdb gemini-eval` runs the step for real, in a throwaway database
+(`data/eval/`, matching names with `data/musicbrainz.sqlite`), on the two
+default cases (Ty Segall at Mo's Desert Clubhouse: Earth Tongue and Speeding
+Vehicle; Iguana Death Cult at Zebulon: Flat Worms, not on setlist.fm): ~2
+searches, 2 Gemini calls. `--case NAME` or `--all` for the rest (~10 Gemini
+calls, ~25 context.dev credits). `tests/test_gemini.py` replays the Ty Segall
+tour offline from captured search answers and the promoter's tour page.
 
 ## Roadmap
 
