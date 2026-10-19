@@ -132,14 +132,19 @@ saved before the show. MusicSceneMap queries it only when someone asks for
 concert recommendations; this crawler queries every venue the ledger knows
 about, on a schedule, with tight limits:
 
-- its own long process (`concertdb pollstar`, started daily next to `run`):
-  one request a second, at most 20,000 a day (`POLLSTAR_INTERVAL`,
-  `POLLSTAR_DAILY_LIMIT` in `.env`); `run` itself spends at most 300 when the
-  Pollstar process isn't running
-- pushback (HTTP 403, 429, 503 or a network error) waits (`Retry-After`, else
-  30 s, 60 s, 120 s, 300 s, 600 s), slows to 1.5× the interval for the rest of
-  the run (capped at 10 s) and retries; six in a row pauses Pollstar for 12
-  hours for every process, so a block isn't made worse
+- its own long process (`concertdb pollstar`, started daily next to `run`),
+  at most 20,000 requests a day (`POLLSTAR_DAILY_LIMIT`); `run` itself spends
+  at most 300 when the Pollstar process isn't running
+- the pace adapts and is remembered between runs (`meta.pollstar_interval`).
+  At one request a second Pollstar answered HTTP 403 after ~400–550 requests
+  (~9 minutes), two nights running. Now requests start 6 s apart
+  (`POLLSTAR_INTERVAL`, also the floor); pushback (HTTP 403, 429, 503 or a
+  network error) doubles the interval (up to 120 s), waits (`Retry-After`, else
+  30 s, 60 s, 120 s, 300 s, 600 s) and retries; 300 clean requests in a row
+  take 20% off the interval, down to the floor
+- six pushbacks in a row pause Pollstar for every process, so a block isn't
+  made worse: 12 hours, doubling each time it happens again (up to a week),
+  back to 12 hours after a run with 300 clean requests
 - the due list is re-read every 200 units and newly found venues are queued
   for lookup every 30 minutes, so a run lasting hours picks up what setlist.fm
   found that day

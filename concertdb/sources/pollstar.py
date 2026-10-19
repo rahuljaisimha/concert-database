@@ -7,11 +7,18 @@ before the show. Endpoints are the ones MusicSceneMap uses (src/api/pollstar.ts)
   Autocomplete  https://autocomplete.pollstar.com/global/All/100/{query}
   Events        https://www.pollstar.com/api/companies/{venueId}/events?...
 
-Request discipline (Pollstar is a site, not an API we have a key for):
-  - one request every POLL_INTERVAL seconds, at most DAILY_LIMIT per day
-    (POLLSTAR_INTERVAL / POLLSTAR_DAILY_LIMIT in .env)
-  - pushback (HTTP 403, 429, 503 or a network error) waits, slows down for the
-    rest of the run and retries; several in a row ends the run for the day
+Request discipline (Pollstar is a site, not an API we have a key for). At one
+request a second it answered HTTP 403 after ~400-550 requests (~9 minutes),
+two nights running, so the pace adapts and is remembered between runs:
+  - requests go `interval` seconds apart, stored in meta (pollstar_interval);
+    it starts at, and never goes below, POLL_INTERVAL (POLLSTAR_INTERVAL in
+    .env, default 6 s), at most DAILY_LIMIT a day (POLLSTAR_DAILY_LIMIT)
+  - pushback (HTTP 403, 429, 503 or a network error) doubles the interval (up to
+    MAX_INTERVAL), waits (Retry-After, else BACKOFF_SECONDS: 30 s doubling to
+    600 s) and retries; SPEEDUP_AFTER clean requests in a row take 20% off it
+  - len(BACKOFF_SECONDS) + 1 pushbacks in a row pause Pollstar for every
+    process: 12 h, doubling each time it happens again (up to a week), back to
+    12 h after a run with SPEEDUP_AFTER clean requests
   - a venue's name is looked up once; the match (or no-match) is stored and
     never looked up again for a year
   - each venue's event list is rechecked every 3 days, backing off to 14 days
@@ -43,15 +50,19 @@ from ..normalize import norm
 SOURCE = "pollstar"
 AUTOCOMPLETE = "https://autocomplete.pollstar.com/global/All/100/{q}"
 EVENTS = "https://www.pollstar.com/api/companies/{id}/events"
-POLL_INTERVAL = float(os.environ.get("POLLSTAR_INTERVAL") or 1.0)        # seconds, start to start
+POLL_INTERVAL = float(os.environ.get("POLLSTAR_INTERVAL") or 6.0)        # seconds, start to start; the floor
 DAILY_LIMIT = int(os.environ.get("POLLSTAR_DAILY_LIMIT") or 20_000)
-MAX_INTERVAL = 10.0
-# Pollstar has no published limit, so treat these as "slow down": wait, slow to
-# 1.5x the interval for the rest of the run, retry. After len(BACKOFF_SECONDS)
-# in a row, stop for the day rather than risk the IP being blocked.
+MAX_INTERVAL = 120.0
+SLOWDOWN = 2.0              # interval x this after pushback
+SPEEDUP = 0.8               # interval x this after SPEEDUP_AFTER clean requests in a row
+SPEEDUP_AFTER = 300
+# Pollstar has no published limit, so treat these as "slow down": wait, slow
+# down, retry. After len(BACKOFF_SECONDS) in a row, stop rather than risk the
+# IP being blocked for longer.
 PUSHBACK_STATUSES = (403, 429, 503)
 BACKOFF_SECONDS = (30, 60, 120, 300, 600)
 PAUSE_HOURS = 12            # after being stopped, no Pollstar requests from any process
+MAX_PAUSE_HOURS = 7 * 24
 sleep = time.sleep          # replaced in tests
 DUE_BATCH = 200             # re-read what's due this often, so a long run sees new work
 REQUEUE_SECONDS = 1800      # look for newly found venues to resolve every 30 min
@@ -157,9 +168,16 @@ class Client:
         ua = user_agent()
         self.headers = {"Accept": "application/json", **({"User-Agent": ua} if ua else {})}
 
-    def slow_down(self) -> float:
-        self.fetcher.min_interval = min(MAX_INTERVAL, max(self.fetcher.min_interval, 1.0) * 1.5)
+    @property
+    def interval(self) -> float:
         return self.fetcher.min_interval
+
+    def set_interval(self, seconds: float) -> None:
+        self.fetcher.min_interval = seconds
+
+    def slow_down(self) -> float:
+        self.set_interval(min(MAX_INTERVAL, max(self.interval, POLL_INTERVAL) * SLOWDOWN))
+        return self.interval
 
     def autocomplete(self, query: str):
         from urllib.parse import quote
@@ -231,11 +249,37 @@ def paused_until(conn: sqlite3.Connection) -> str | None:
     return None
 
 
+def _meta(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def _set_meta(conn: sqlite3.Connection, key: str, value) -> None:
+    conn.execute("INSERT INTO meta (key, value) VALUES (?, ?)"
+                 " ON CONFLICT (key) DO UPDATE SET value = excluded.value", (key, str(value)))
+
+
+def current_interval(conn: sqlite3.Connection) -> float:
+    """The pace earned so far: never below POLL_INTERVAL (so lowering it in .env takes effect)."""
+    try:
+        return min(MAX_INTERVAL, max(POLL_INTERVAL, float(_meta(conn, "pollstar_interval") or 0)))
+    except ValueError:
+        return POLL_INTERVAL
+
+
+def pause_hours(conn: sqlite3.Connection) -> float:
+    try:
+        return float(_meta(conn, "pollstar_pause_hours") or PAUSE_HOURS)
+    except ValueError:
+        return PAUSE_HOURS
+
+
 def pause(conn: sqlite3.Connection, hours: float) -> str:
+    """Pause Pollstar for every process; the next pause (if it happens again) is twice as long."""
     until = state._iso(state._now() + timedelta(hours=hours))
     db.begin_write(conn)
-    conn.execute("INSERT INTO meta (key, value) VALUES ('pollstar_paused_until', ?)"
-                 " ON CONFLICT (key) DO UPDATE SET value = excluded.value", (until,))
+    _set_meta(conn, "pollstar_paused_until", until)
+    _set_meta(conn, "pollstar_pause_hours", min(MAX_PAUSE_HOURS, hours * 2))
     return until
 
 
@@ -246,12 +290,21 @@ class Blocked(Exception):
 def capture(conn: sqlite3.Connection, client: Client, max_requests: int = DAILY_LIMIT, log=print) -> dict:
     """Work through due lookups and event lists until the budget or the work runs out."""
     stats = {"requests": 0, "resolved": 0, "venues": 0, "unchanged": 0, "events": 0,
-             "pushback": 0, "_streak": 0}
+             "pushback": 0, "_streak": 0, "_clean": 0}
     until = paused_until(conn)
     if until:
         log(f"pollstar: paused until {until} after repeated pushback; skipping")
-        stats.pop("_streak")
+        stats.pop("_streak"), stats.pop("_clean")
         return stats
+    adaptive = hasattr(client, "set_interval")
+    if adaptive:
+        client.set_interval(current_interval(conn))
+        stats["interval"] = client.interval
+        log(f"pollstar: {client.interval:.1f}s between requests")
+
+    def remember(interval: float) -> None:
+        _set_meta(conn, "pollstar_interval", round(interval, 2))     # inside get()'s write transaction
+        stats["interval"] = interval
 
     def budget_left() -> bool:
         return stats["requests"] < max_requests and state.requests_today(conn, SOURCE) < DAILY_LIMIT
@@ -269,15 +322,23 @@ def capture(conn: sqlite3.Connection, client: Client, max_requests: int = DAILY_
             state.record_usage(conn, SOURCE)
             if resp is not None and resp.status not in PUSHBACK_STATUSES:
                 stats["_streak"] = 0
+                stats["_clean"] += 1
+                if adaptive and stats["_clean"] % SPEEDUP_AFTER == 0 and client.interval > POLL_INTERVAL:
+                    client.set_interval(max(POLL_INTERVAL, client.interval * SPEEDUP))
+                    remember(client.interval)
+                    log(f"  pollstar: {SPEEDUP_AFTER} clean requests, speeding up to {client.interval:.1f}s")
                 return resp
             if resp is not None:
                 why = f"HTTP {resp.status} {resp.text[:120]!r}"
             streak = stats["_streak"]
             stats["pushback"] += 1
+            stats["_clean"] = 0
             if streak >= len(BACKOFF_SECONDS):
                 raise Blocked(why)
             wait = max((resp.retry_after if resp is not None else None) or 0, BACKOFF_SECONDS[streak])
             interval = client.slow_down() if hasattr(client, "slow_down") else None
+            if adaptive and interval:
+                remember(interval)
             log(f"  pollstar: {why}; waiting {wait:.0f}s"
                 + (f", then {interval:.1f}s between requests" if interval else ""))
             stats["_streak"] = streak + 1
@@ -305,10 +366,15 @@ def capture(conn: sqlite3.Connection, client: Client, max_requests: int = DAILY_
                     _resolve(conn, get, client, row, int(ident), stats, log)
                 conn.commit()
     except Blocked as exc:
-        until = pause(conn, PAUSE_HOURS)
+        until = pause(conn, pause_hours(conn))
         log(f"pollstar: {len(BACKOFF_SECONDS) + 1} pushbacks in a row ({exc}); paused until {until}")
         conn.commit()
-    stats.pop("_streak", None)
+    else:
+        if stats["_clean"] >= SPEEDUP_AFTER and _meta(conn, "pollstar_pause_hours"):
+            db.begin_write(conn)
+            conn.execute("DELETE FROM meta WHERE key = 'pollstar_pause_hours'")   # a good run: back to 12 h
+            conn.commit()
+    stats.pop("_streak", None), stats.pop("_clean", None)
     return stats
 
 
