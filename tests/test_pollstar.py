@@ -242,8 +242,9 @@ def test_norm_unescapes():
     assert norm("Bar &amp; Grill") == norm("Bar & Grill") == "bar and grill"
 
 
-def test_unchanged_event_lists_are_not_archived_again(conn, tmp_path):
+def test_unchanged_event_lists_are_not_archived_again(conn, tmp_path, monkeypatch):
     from concertdb.http import Fetcher
+    monkeypatch.setattr(pollstar, "POLL_INTERVAL", 0.0)            # a real Fetcher would wait 6 s
 
     class FakeSession:
         headers = {}
@@ -263,3 +264,75 @@ def test_unchanged_event_lists_are_not_archived_again(conn, tmp_path):
     conn.execute("UPDATE crawl_state SET next_due = '2000-01-01' WHERE key = 'venue:501234'")
     stats = pollstar.capture(conn, client, log=lambda *_: None)    # same list again: not archived
     assert stats["unchanged"] == 1 and day_files[0].stat().st_size == size
+
+
+class PacedClient(SequenceClient):
+    """Like the real Client: the pace can be set from the stored value and slows down x2."""
+
+    def set_interval(self, seconds):
+        self.interval = seconds
+
+    def slow_down(self):
+        self.interval = min(pollstar.MAX_INTERVAL, max(self.interval, pollstar.POLL_INTERVAL) * pollstar.SLOWDOWN)
+        return self.interval
+
+
+def test_real_client_slows_down_by_doubling(tmp_path):
+    from concertdb.http import Fetcher
+    c = pollstar.Client(Fetcher(tmp_path, min_interval=pollstar.POLL_INTERVAL))
+    assert c.slow_down() == pollstar.POLL_INTERVAL * 2 and c.slow_down() == pollstar.POLL_INTERVAL * 4
+    c.set_interval(100)
+    assert c.slow_down() == pollstar.MAX_INTERVAL
+
+
+def test_the_pace_is_remembered_between_runs(conn, monkeypatch):
+    monkeypatch.setattr(pollstar, "sleep", lambda s: None)
+    _watch_zebulon(conn)
+    client = PacedClient([status(403), EV])
+    stats = pollstar.capture(conn, client, log=lambda *_: None)
+    assert stats["interval"] == pollstar.POLL_INTERVAL * 2
+    assert pollstar.current_interval(conn) == pollstar.POLL_INTERVAL * 2
+    # The next run (any process) starts at the slower pace, not back at the floor.
+    conn.execute("UPDATE crawl_state SET next_due = '2000-01-01'")
+    nxt = PacedClient([EV])
+    pollstar.capture(conn, nxt, log=lambda *_: None)
+    assert nxt.interval == pollstar.POLL_INTERVAL * 2
+
+
+def test_clean_requests_speed_back_up_to_the_floor(conn, monkeypatch):
+    monkeypatch.setattr(pollstar, "SPEEDUP_AFTER", 1)
+    _watch_zebulon(conn)
+    pollstar._set_meta(conn, "pollstar_interval", pollstar.POLL_INTERVAL * 1.1)
+    conn.commit()
+    client = PacedClient([EV])
+    pollstar.capture(conn, client, log=lambda *_: None)
+    assert client.interval == pollstar.POLL_INTERVAL                      # x0.8, but not below the floor
+    assert pollstar.current_interval(conn) == pollstar.POLL_INTERVAL
+    pollstar._set_meta(conn, "pollstar_interval", 0.5)                   # below the floor (e.g. older runs)
+    assert pollstar.current_interval(conn) == pollstar.POLL_INTERVAL
+
+
+def test_pauses_double_when_blocked_again(conn, monkeypatch):
+    monkeypatch.setattr(pollstar, "sleep", lambda s: None)
+    _watch_zebulon(conn)
+    from datetime import datetime, timezone
+
+    def hours_paused():
+        until = datetime.fromisoformat(pollstar.paused_until(conn))
+        return round((until - datetime.now(timezone.utc)).total_seconds() / 3600)
+
+    pollstar.capture(conn, PacedClient([status(403)] * 20), log=lambda *_: None)
+    assert hours_paused() == pollstar.PAUSE_HOURS
+    pollstar._set_meta(conn, "pollstar_paused_until", "2000-01-01T00:00:00+00:00")   # the pause ran out
+    conn.execute("UPDATE crawl_state SET next_due = '2000-01-01'")
+    conn.commit()
+    pollstar.capture(conn, PacedClient([status(403)] * 20), log=lambda *_: None)
+    assert hours_paused() == pollstar.PAUSE_HOURS * 2
+    assert pollstar.pause_hours(conn) == pollstar.PAUSE_HOURS * 4
+    # A good run resets it.
+    monkeypatch.setattr(pollstar, "SPEEDUP_AFTER", 1)
+    pollstar._set_meta(conn, "pollstar_paused_until", "2000-01-01T00:00:00+00:00")
+    conn.execute("UPDATE crawl_state SET next_due = '2000-01-01'")
+    conn.commit()
+    pollstar.capture(conn, PacedClient([EV]), log=lambda *_: None)
+    assert pollstar.pause_hours(conn) == pollstar.PAUSE_HOURS
