@@ -26,6 +26,7 @@ export default {
     if (request.method !== "GET" && request.method !== "HEAD") return new Response("Method not allowed", {status: 405});
     const url = new URL(request.url);
     if (url.pathname !== "/" && url.pathname !== "/index.html") return new Response("Not found", {status: 404});
+    if (!env.BUCKET) return new Response("No R2 binding named BUCKET (Settings → Bindings)", {status: 500});
     const obj = await env.BUCKET.get(KEY);
     if (!obj) return new Response("No dashboard uploaded yet", {status: 404});
     const headers = new Headers(HEADERS);
