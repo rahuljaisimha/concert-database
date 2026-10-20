@@ -124,7 +124,10 @@ See docs/HOSTING.md.
 server, no network) rewritten at the end of every `run`, `gemini` and
 `pollstar` step, or on demand with `concertdb dashboard`. Set
 `CONCERTDB_DASHBOARD` to also write a copy somewhere handier (on WSL, e.g.
-`/mnt/c/Users/<you>/concertdb-dashboard.html`).
+`/mnt/c/Users/<you>/concertdb-dashboard.html`). With the `R2_*` variables set
+it is also uploaded to the backup bucket as `dashboards/index.html`, which a
+small Worker behind Cloudflare Access serves to your phone (docs/HOSTING.md,
+"Dashboard on your phone").
 
 - **The data**: concerts (past, upcoming, cancelled), artists with concerts
   and how many are matched to MusicBrainz, acts per concert (0 / 1 / 2 / 3 /

@@ -134,3 +134,43 @@ keeps 7 daily and 8 weekly snapshots, and a 30-day rule would delete the
 older weekly ones. If MusicSceneMap later needs a public
 file (e.g. the exported `opened_for` edges), publish it to the existing public
 graph bucket instead.
+
+## Dashboard on your phone
+
+Every run uploads `data/dashboard.html` to the same bucket as
+`dashboards/index.html` (when the `R2_*` variables are set). The bucket stays
+private; a small Cloudflare Worker (`deploy/dashboard-worker/`) serves that one
+object, and nothing else in the bucket, behind Cloudflare Access, so only you
+can open it, from anywhere, even while the PC is off (you see the last upload).
+
+Never turn on the bucket's `r2.dev` URL or attach a custom domain to the bucket
+itself to do this: either would expose the database snapshots too.
+
+1. **Access (sign-in).** Cloudflare dashboard → Zero Trust (the free plan is
+   enough; pick a team name). Settings → Authentication → add "One-time PIN"
+   (a code by email).
+2. **The Worker.** Workers & Pages → Create → Worker, named
+   `concertdb-dashboard`, with the code of `deploy/dashboard-worker/worker.js`
+   (or `npx wrangler deploy` from that folder). Settings → Bindings → add an
+   R2 bucket binding `BUCKET` → `concert-database`.
+3. **Where it lives.** Either a custom domain (Settings → Domains & Routes →
+   Add → Custom domain, e.g. `concerts.<your domain>`, if the domain is on
+   Cloudflare), or the `*.workers.dev` URL.
+4. **Lock it.** Zero Trust → Access → Applications → Add → Self-hosted:
+   the hostname from step 3, a policy "Allow" with Include → Emails → your
+   address. (For the workers.dev URL, the Worker's Settings → Domains & Routes
+   has a one-click "Enable Cloudflare Access" instead.) Turn off workers.dev
+   if you use a custom domain.
+5. **Tell the Worker which Access app to trust.** From the Access
+   application's Overview copy the "Application Audience (AUD) Tag"; in the
+   Worker → Settings → Variables add `POLICY_AUD` = that tag and
+   `TEAM_DOMAIN` = `https://<team>.cloudflareaccess.com`. The Worker checks
+   Access's signed token on every request and answers 403 without it, so a
+   request that gets around Access (a mistake in the policy, the workers.dev
+   URL left on) still sees nothing.
+
+Open the URL on your phone, enter your email, type the code: the session lasts
+24 hours by default (Access → Applications → your app → session duration).
+The page holds counts and run summaries, no API keys (they are sent in
+headers, never in URLs or error messages). The R2 token in `.env` already
+covers the new prefix; no lifecycle rule is needed (one object, replaced).

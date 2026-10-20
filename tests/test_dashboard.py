@@ -85,3 +85,37 @@ def test_cli_backup_and_dashboard(tmp_path, monkeypatch, capsys):
     assert (tmp_path / "dashboard.html").exists() and second.exists()
     info = dashboard.collect(cli._conn(cli.build_parser().parse_args(["--db", dbp, "status"])), snapshot=False)
     assert info["runs"]["backup"]["stale"] is False and info["runs"]["last"]["backup"]["stats"]["bytes"] > 0
+
+
+class FakeS3:
+    def __init__(self):
+        self.uploads = []
+
+    def upload_file(self, path, bucket, key, ExtraArgs=None):
+        self.uploads.append((open(path).read(), bucket, key, ExtraArgs))
+
+
+def test_dashboard_goes_to_r2_when_configured(tmp_path, monkeypatch, capsys):
+    from concertdb import backup
+    s3 = FakeS3()
+    monkeypatch.setattr(backup, "_r2", lambda: (s3, "concert-database"))
+    monkeypatch.delenv("CONCERTDB_DASHBOARD", raising=False)
+    for k in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET"):
+        monkeypatch.setenv(k, "x")
+    dbp = str(tmp_path / "ledger.sqlite")
+    cli.main(["--db", dbp, "dashboard"])
+    (html, bucket, key, extra), = s3.uploads
+    assert key == "dashboards/index.html" and bucket == "concert-database"
+    assert html.startswith("<!doctype html>") and extra["ContentType"].startswith("text/html")
+    cli.main(["--db", dbp, "dashboard", "--no-upload"])
+    assert len(s3.uploads) == 1
+
+
+def test_a_failed_upload_never_fails_a_run(tmp_path, monkeypatch, capsys):
+    from concertdb import backup
+    monkeypatch.setattr(backup, "r2_configured", lambda: True)
+    monkeypatch.setattr(backup, "upload_dashboard", lambda p: (_ for _ in ()).throw(OSError("offline")))
+    monkeypatch.delenv("SETLISTFM_API_KEY", raising=False)
+    cli.main(["--db", str(tmp_path / "ledger.sqlite"), "run", "--no-backup", "--pollstar-requests", "0"])
+    assert "dashboard problem (the run carries on): OSError: offline" in capsys.readouterr().out
+    assert (tmp_path / "dashboard.html").exists()

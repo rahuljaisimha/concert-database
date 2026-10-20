@@ -4,6 +4,8 @@ Local: data/backups/ledger-<UTC timestamp>.sqlite.gz, newest 7 kept.
 Remote (if R2_* env vars are set), bucket layout:
     snapshots/ledger-<ts>.sqlite.gz   newest 7, plus the newest of each of the last 8 weeks
     raw/<source>/<day>.jsonl.gz       the raw response archive (re-uploaded while it grows)
+    dashboards/index.html             the latest data/dashboard.html (served to your phone by
+                                      deploy/dashboard-worker behind Cloudflare Access; docs/HOSTING.md)
 
 Env: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET.
 Needs boto3 (pip install 'concertdb[r2]').
@@ -145,6 +147,19 @@ def upload(snapshot_path: Path, data_dir: Path, log=print) -> None:
     for k in snaps:
         if k not in keep:
             s3.delete_object(Bucket=bucket, Key=k)
+
+
+DASHBOARD_KEY = "dashboards/index.html"
+
+
+def upload_dashboard(path: Path, log=print) -> str:
+    """The dashboard page to R2 (dashboards/index.html), replacing the last one. The bucket
+    stays private: only the dashboard Worker reads it, and only this key."""
+    s3, bucket = _r2()
+    s3.upload_file(str(path), bucket, DASHBOARD_KEY,
+                   ExtraArgs={"ContentType": "text/html; charset=utf-8", "CacheControl": "no-store"})
+    log(f"uploaded {DASHBOARD_KEY}")
+    return DASHBOARD_KEY
 
 
 def restore(db_path: Path, data_dir: Path, log=print) -> Path:
