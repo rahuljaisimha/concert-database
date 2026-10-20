@@ -114,7 +114,7 @@ EXCERPT_WIDTH = 350         # page text kept on each side of a venue/city/date m
 MAX_PAGE_CHARS = 6000       # excerpt text per page in a prompt
 MAX_PROMPT_CHARS = 60000
 DISCOVER_DAYS = 14
-PROMPT_VERSION = 3
+PROMPT_VERSION = 4
 YEAR_CONTEXT_CHARS = 1500   # a listing without a year: the nearest year this far above it on the page counts
 NEAR_CHARS = 400            # "page" evidence: the act this close to the artist or the show's date
 HANDLE_SUFFIXES = ("band", "music", "official")   # @flatwormsband -> Flat Worms
@@ -334,6 +334,9 @@ def build_prompt(artist: str, shows: list[dict], pages: list[dict], snippets: li
         "headliner is its top-billed act and openers the rest of the lineup in billing order.",
         "Write act names as the bill spells them, not social-media handles (\"Flat Worms\", not "
         "\"@flatwormsband\").",
+        "Openers and headliner are act names only (bands, artists, DJs), written in full: not "
+        "descriptions such as \"local support\" or \"students from the music school\", and not "
+        "names cut short with \"...\".",
         "Don't guess: an empty openers list is fine. Don't include the headliner among the openers.",
         "", "SHOWS:",
     ]
@@ -400,6 +403,44 @@ def parse_answer(text: str) -> dict | None:
                 "openers": _names(s.get("openers")), "festival": s.get("festival") is True,
                 "quote": s["quote"].strip(), "url": _str(s.get("url"))})
     return {"shows": shows, "other_shows": others}
+
+
+TRUNCATED = re.compile(r"\s*(\.{2,}|\u2026)\s*$")
+DESCRIPTION = re.compile(
+    r"\b(special guests?|surprise guests?|guests? tba|tba|tbc|tbd|and (many )?more|\+ ?more|and friends|"
+    r"various artists|local (bands?|acts?|support|openers?)|support acts?|students|groups from)\b", re.I)
+MAX_NAME_WORDS = 6
+
+
+def complete_name(name: str, texts: list[dict]) -> str | None:
+    """A name cut short ("The Blind Shak...") as the one full name on the pages that starts
+    with it ("The Blind Shakes"); None if there is no such name or more than one."""
+    prefix = TRUNCATED.sub("", name)
+    if len(prefix) < 3:
+        return None
+    found = set()
+    for t in texts:
+        for m in re.finditer(re.escape(prefix) + r"[\w'\u2019-]*", t.get("text") or "", re.I):
+            full = m.group(0)
+            if len(full) > len(prefix) and not TRUNCATED.search(t["text"][m.end():m.end() + 3]):
+                found.add(full)
+    by_norm = {norm(f): f for f in sorted(found)}
+    return next(iter(by_norm.values())) if len(by_norm) == 1 else None
+
+
+def name_check(name: str, texts: list[dict]) -> tuple[str, str | None]:
+    """(name to store, flag): a truncated name completed from the pages if it can be, otherwise
+    kept as written and flagged "truncated"; a name that reads like a description of acts
+    rather than an act kept and flagged "description". Nothing is dropped: a wrongly kept
+    name can be recategorised later, a dropped act is lost."""
+    if TRUNCATED.search(name):
+        full = complete_name(name, texts)
+        return (full, "completed") if full else (name, "truncated")
+    words = name.split()
+    if DESCRIPTION.search(name) or len(words) > MAX_NAME_WORDS \
+            or (len(words) >= 3 and words[0][:1].islower() and words[0].isalpha()):
+        return name, "description"
+    return name, None
 
 
 def quote_source(quote: str | None, texts: list[dict]) -> dict | None:
@@ -699,7 +740,8 @@ class Run:
         self.stats = {"model": self.model, "tours": 0, "shows": 0, "searches": 0, "searxng": 0,
                       "contextdev": 0, "contextdev_credits": 0, "credits": 0,
                       "pages": 0, "gemini_calls": 0, "tokens": 0, "specific": 0, "page_only": 0,
-                      "not_found": 0, "festival": 0, "discovered": 0, "skipped": 0, "errors": 0, "stopped": None}
+                      "not_found": 0, "festival": 0, "discovered": 0,
+                      "names_completed": 0, "names_flagged": 0, "skipped": 0, "errors": 0, "stopped": None}
         self.pages: dict[str, dict] = {}      # url -> {"url", "text", "words"}; fetched once per run
         self.backup_text: dict[str, str] = {}  # url -> the search's passages from it, if fetching fails
         self.sleep = time.sleep
@@ -942,7 +984,7 @@ class Run:
 
         db.begin_write(self.conn)
         for s in tour:
-            self.store(s, results[s["id"]])
+            self.store(s, results[s["id"]], all_texts)
         self.discover(tour, others, all_texts)
         self.conn.commit()
 
@@ -959,6 +1001,23 @@ class Run:
             if row:
                 return row["name"]
         return n
+
+    def checked_name(self, name: str, texts: list[dict]) -> tuple[int, dict]:
+        """The artist id for an act name, after name_check(), and the claim extra to note it."""
+        fixed, flag = name_check(self.canonical(name), texts)
+        aid = ledger.get_or_create_artist(self.conn, fixed)
+        if flag == "description" and self.conn.execute(
+                "SELECT mbid FROM artists WHERE id = ?", (aid,)).fetchone()["mbid"]:
+            flag = None                                 # a real MusicBrainz artist ("Death from Above 1979")
+        if flag == "completed":
+            self.stats["names_completed"] += 1
+            self.log(f"    name {name!r} completed from the page as {fixed!r}")
+            return aid, {"name_check": "completed", "name_as_given": name}
+        if flag:
+            self.stats["names_flagged"] += 1
+            self.log(f"    name {name!r} kept, flagged {flag}")
+            return aid, {"name_check": flag}
+        return aid, {}
 
     def judge(self, show: dict, ans: dict | None, texts: list[dict]) -> dict:
         """Which acts of an answer hold up against the texts, and how firmly."""
@@ -993,7 +1052,7 @@ class Run:
         out["url"] = src["url"] if specific else None
         return out
 
-    def store(self, show: dict, r: dict) -> None:
+    def store(self, show: dict, r: dict, texts: list[dict] | None = None) -> None:
         key = f"show:{show['id']}"
         self.stats["shows"] += 1
         if r["dropped"]:
@@ -1009,8 +1068,9 @@ class Run:
             extra = {"model": self.model, "prompt_version": PROMPT_VERSION, "check": check,
                      **({"festival": True} if r["festival"] else {}),
                      **({"quote": r["quote"][:500]} if check == "specific" and r["quote"] else {})}
-            aid = show["lead_id"] if norm(name) == norm(show["lead"]) else \
-                ledger.get_or_create_artist(self.conn, self.canonical(name))
+            aid, flags = (show["lead_id"], {}) if norm(name) == norm(show["lead"]) else \
+                self.checked_name(name, texts or [])
+            extra.update(flags)
             ledger.add_claim(self.conn, show["id"], aid, SOURCE, key, role=role, confidence=conf,
                              position=pos, url=url, extra=extra, resolve=False)
         ledger.resolve_show(self.conn, show["id"])     # a festival flag on a claim marks the show
@@ -1084,15 +1144,14 @@ class Run:
                 in_quote = mentions(qwords, name)
                 if not (in_quote or norm(name) == norm(artist)):
                     continue                            # an act the quote doesn't name: not trusted
-                aid = lead_id if norm(name) == norm(artist) else \
-                    ledger.get_or_create_artist(self.conn, self.canonical(name))
+                aid, flags = (lead_id, {}) if norm(name) == norm(artist) else self.checked_name(name, texts)
                 ledger.add_claim(self.conn, show_id, aid, SOURCE, native, role=role,
                                  confidence=CONF_SPECIFIC if in_quote else CONF_PAGE,
                                  position=pos if role != "unknown" else None, url=src["url"],
                                  extra={"model": self.model, "prompt_version": PROMPT_VERSION,
                                         "check": "discovered", "quote": o["quote"][:500],
                                         **({"festival": True} if o["festival"] or len(o["openers"]) > MAX_OPENERS
-                                           else {})},
+                                           else {}), **flags},
                                  resolve=False)
                 stored.append(f"{name} ({role})")
             ledger.resolve_show(self.conn, show_id)

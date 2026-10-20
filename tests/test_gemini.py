@@ -532,6 +532,54 @@ def test_a_social_handle_becomes_the_artist(conn):
     assert run.canonical("Hot Garbage") == "Hot Garbage" and run.canonical("knee") == "knee"
 
 
+
+def test_names_cut_short_are_completed_from_the_page_or_flagged():
+    texts = [{"url": "u", "text": "Fri: The Blind Shak... + more. Lineup: The Blind Shakes, Earth Tongue."}]
+    assert gemini.name_check("The Blind Shak...", texts) == ("The Blind Shakes", "completed")
+    assert gemini.name_check("The Blind Shak\u2026", texts) == ("The Blind Shakes", "completed")
+    two = [{"url": "u", "text": "The Blind Shakes and The Blind Shakers"}]
+    assert gemini.name_check("The Blind Shak...", two) == ("The Blind Shak...", "truncated")
+    assert gemini.name_check("The Blind Shak...", []) == ("The Blind Shak...", "truncated")
+
+
+def test_names_that_describe_acts_are_kept_but_flagged():
+    for name in ("groups from Bay Area Rock Camp for Girls", "Special Guests", "local support",
+                 "students of the Lyon conservatoire", "DJ sets all night long by the residents crew"):
+        assert gemini.name_check(name, [])[1] == "description", name
+    for name in ("Earth Tongue", "R.M.F.C.", "Florence and the Machine", "of Montreal", "bbno$"):
+        assert gemini.name_check(name, []) == (name, None), name
+
+
+METRO_ODD_PAGE = ("<html><body><h2>Ty Segall</h2><p>Monday 2 March 2026, The Metro Theatre, Sydney."
+                  " Support from Earth Tongue, The Blind Shak... and groups from Bay Area Rock Camp for Girls."
+                  "</p><p>Also on the bill: The Blind Shakes (SF).</p></body></html>")
+METRO_ODD_ANSWER = {"shows": [{"date": "2026-03-02", "headliner": "Ty Segall",
+                               "openers": ["Earth Tongue", "The Blind Shak...",
+                                           "groups from Bay Area Rock Camp for Girls"],
+                               "show_specific_quote": "Monday 2 March 2026, The Metro Theatre, Sydney. Support from "
+                                                      "Earth Tongue, The Blind Shak... and groups from Bay Area Rock "
+                                                      "Camp for Girls.",
+                               "url": METRO_URL}], "other_shows": []}
+
+
+def test_odd_names_are_stored_and_noted(conn):
+    *_, metro = ty_tour(conn)
+    client = ty_client()
+    client.pages[METRO_URL] = METRO_ODD_PAGE
+    client.answers[1] = answer(METRO_ODD_ANSWER)
+    stats = gemini.ask(conn, client, **QUIET)
+    b = billing(conn, metro)
+    assert {"The Blind Shakes", "groups from Bay Area Rock Camp for Girls"} <= set(b)    # nothing dropped
+    assert stats["names_completed"] == 1 and stats["names_flagged"] == 1
+    extras = {r["name"]: json.loads(r["extra"]) for r in conn.execute(
+        "SELECT a.name, c.extra FROM claims c JOIN artists a ON a.id = c.artist_id"
+        " WHERE c.source = 'gemini' AND c.show_id = ?", (metro,))}
+    assert extras["The Blind Shakes"]["name_check"] == "completed"
+    assert extras["The Blind Shakes"]["name_as_given"] == "The Blind Shak..."
+    assert extras["groups from Bay Area Rock Camp for Girls"]["name_check"] == "description"
+    assert "name_check" not in extras["Earth Tongue"]
+
+
 def test_overloaded_gemini_is_waited_out(conn, monkeypatch):
     ty_tour(conn)
     client = ty_client()
