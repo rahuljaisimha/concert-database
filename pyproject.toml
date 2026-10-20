@@ -20,7 +20,7 @@ build-backend = "setuptools.build_meta"
 include = ["concertdb*"]
 
 [tool.setuptools.package-data]
-concertdb = ["*.json"]
+concertdb = ["*.json", "*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

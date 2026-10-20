@@ -7,7 +7,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from . import backup, db, export, ledger, musicbrainz, seed, smoke, state, status
+from . import backup, dashboard, db, export, ledger, musicbrainz, runs, seed, smoke, state, status
 from .http import Fetcher
 from .normalize import norm
 from .sources import gemini, jsonld, pollstar, setlistfm
@@ -102,7 +102,8 @@ def cmd_capture_add(args):
 
 def cmd_capture_run(args):
     conn = _conn(args)
-    stats = jsonld.capture(conn, Fetcher(_data_dir(args), min_interval=1.0), limit=args.limit)
+    stats = runs.record(conn, "capture", lambda: jsonld.capture(
+        conn, Fetcher(_data_dir(args), min_interval=1.0), limit=args.limit))
     print(stats)
 
 
@@ -129,12 +130,15 @@ def cmd_pollstar_add(args):
 
 def cmd_pollstar(args):
     conn = _conn(args)
-    print(pollstar.capture(conn, _pollstar_client(args), max_requests=args.max_requests))
+    print(runs.record(conn, "pollstar", lambda: pollstar.capture(
+        conn, _pollstar_client(args), max_requests=args.max_requests)))
+    _write_dashboard(args, conn)
 
 
 def cmd_crawl_setlistfm(args):
     conn = _conn(args)
-    stats = setlistfm.crawl(conn, _setlistfm_client(args), max_requests=args.max_requests)
+    stats = runs.record(conn, "setlistfm", lambda: setlistfm.crawl(
+        conn, _setlistfm_client(args), max_requests=args.max_requests))
     print(stats)
 
 
@@ -158,9 +162,13 @@ def _monthly_credits() -> int | None:
 
 def cmd_gemini(args):
     conn = _conn(args)
-    print(gemini.ask(conn, _gemini_client(args), max_requests=args.max_requests,
-                     max_credits=args.max_credits, monthly_credits=_monthly_credits(),
-                     max_acts=args.max_acts))
+    client = _gemini_client(args)
+    try:
+        print(runs.record(conn, "gemini", lambda: gemini.ask(
+            conn, client, max_requests=args.max_requests, max_credits=args.max_credits,
+            monthly_credits=_monthly_credits(), max_acts=args.max_acts)))
+    finally:
+        _write_dashboard(args, conn)
 
 
 def cmd_run(args):
@@ -171,10 +179,12 @@ def cmd_run(args):
     """
     conn = _conn(args)
     print("== capture (schema.org pages)")
-    print(jsonld.capture(conn, Fetcher(_data_dir(args), min_interval=1.0)))
+    print(runs.record(conn, "capture", lambda: jsonld.capture(conn, Fetcher(_data_dir(args), min_interval=1.0))))
     if os.environ.get("SETLISTFM_API_KEY"):
         print("== setlist.fm")
-        print(setlistfm.crawl(conn, _setlistfm_client(args), max_requests=args.setlistfm_requests))
+        client = _setlistfm_client(args)
+        print(runs.record(conn, "setlistfm", lambda: setlistfm.crawl(
+            conn, client, max_requests=args.setlistfm_requests)))
     else:
         print("== setlist.fm skipped (no SETLISTFM_API_KEY)")
     # After setlist.fm, so venues it found today get their Pollstar lookup today.
@@ -182,7 +192,8 @@ def cmd_run(args):
     if plock:
         print("== Pollstar (upcoming shows)")
         try:
-            print(pollstar.capture(conn, _pollstar_client(args), max_requests=args.pollstar_requests))
+            print(runs.record(conn, "pollstar", lambda: pollstar.capture(
+                conn, _pollstar_client(args), max_requests=args.pollstar_requests)))
         finally:
             plock.close()
     else:
@@ -190,6 +201,7 @@ def cmd_run(args):
                                          else "the separate Pollstar process is running") + ")")
     if not args.no_backup:
         cmd_backup(args, conn)
+    _write_dashboard(args, conn)
 
 
 def cmd_status(args):
@@ -205,14 +217,40 @@ def cmd_export(args):
 
 def cmd_backup(args, conn=None):
     conn = conn or _conn(args)
-    snap = backup.snapshot(conn, _data_dir(args))
-    print(f"snapshot {snap}")
-    if backup.r2_configured():
-        backup.upload(snap, _data_dir(args))
-    else:
-        print("R2 not configured (R2_* env vars); local snapshot only")
-    # After the upload, so the newest days are in R2 before anything is removed here.
-    backup.prune_raw(_data_dir(args), backup.raw_keep_days())
+
+    def step() -> dict:
+        snap = backup.snapshot(conn, _data_dir(args))
+        print(f"snapshot {snap}")
+        uploaded = backup.r2_configured()
+        if uploaded:
+            backup.upload(snap, _data_dir(args))
+        else:
+            print("R2 not configured (R2_* env vars); local snapshot only")
+        # After the upload, so the newest days are in R2 before anything is removed here.
+        pruned = backup.prune_raw(_data_dir(args), backup.raw_keep_days())
+        return {"snapshot": snap.name, "bytes": snap.stat().st_size, "uploaded": uploaded,
+                "raw_pruned": pruned}
+    return runs.record(conn, "backup", step)
+
+
+def _dashboard_paths(args) -> list[Path]:
+    paths = [Path(getattr(args, "out", None) or _data_dir(args) / "dashboard.html")]
+    extra = os.environ.get("CONCERTDB_DASHBOARD")
+    return paths + ([Path(extra)] if extra else [])
+
+
+def _write_dashboard(args, conn) -> None:
+    """After a scheduled step; a dashboard problem never fails the run."""
+    try:
+        for p in dashboard.write(conn, _dashboard_paths(args)):
+            print(f"dashboard: {p}")
+    except Exception as e:      # noqa: BLE001
+        print(f"dashboard not written: {type(e).__name__}: {e}")
+
+
+def cmd_dashboard(args):
+    for p in dashboard.write(_conn(args), _dashboard_paths(args)):
+        print(f"wrote {p}")
 
 
 def cmd_restore(args):
@@ -339,6 +377,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("status", help="coverage and progress")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_status)
+
+    s = sub.add_parser("dashboard", help="write data/dashboard.html (also written after every"
+                       " run, gemini and pollstar step; $CONCERTDB_DASHBOARD = a second copy)")
+    s.add_argument("--out", help="default: dashboard.html next to the ledger")
+    s.set_defaults(fn=cmd_dashboard)
 
     s = sub.add_parser("export", help="write opened_for edges for MusicSceneMap")
     s.add_argument("--out", default="data/export/opened_for.csv")

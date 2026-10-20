@@ -148,6 +148,22 @@ part-way (budget, rate limit, crash) saves the page it reached in its cursor
 (`recheck_page`) and resumes there: starting again from page 1 would find
 nothing new and stop before the pages it never read.
 
+## Runs and the dashboard (`concertdb/runs.py`, `concertdb/dashboard.py`)
+
+Every scheduled step (`capture`, `setlistfm`, `pollstar`, `gemini`, `backup`)
+goes through `runs.record()`: a `runs` row is written when it starts and
+completed with `ok` and the step's counts (JSON) when it ends, or with the
+error if it raised. A row without `finished_at` is a step still running or one
+whose process was killed. The Gemini step's counts include context.dev's
+`credits_remaining` from the last search (`contextdev_balance`).
+
+`dashboard.collect()` reads the ledger (concerts, artists, lineups),
+`runs`, `usage` (requests per day) and `crawl_state` (queues), and stores the
+headline numbers in `metric_snapshots` for trends and 24 h / 7 day deltas.
+`dashboard.write()` renders `concertdb/dashboard_template.html` with that data
+embedded as JSON; the page draws its own charts (inline SVG, no libraries).
+A dashboard error is printed but never fails a run.
+
 ## Moving to Postgres later
 
 Tables are `STRICT`, dates are ISO-8601 text, booleans are 0/1 integers with

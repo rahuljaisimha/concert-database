@@ -128,6 +128,23 @@ CREATE TABLE IF NOT EXISTS usage (
     usd      REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (day, source)
 ) STRICT;
+
+-- One row per step of a scheduled run (concertdb/runs.py): what it did, for the dashboard.
+CREATE TABLE IF NOT EXISTS runs (
+    id          INTEGER PRIMARY KEY,
+    step        TEXT NOT NULL,             -- capture | setlistfm | pollstar | gemini | backup
+    started_at  TEXT NOT NULL,
+    finished_at TEXT,                      -- NULL: still running, or the process was killed
+    ok          INTEGER CHECK (ok IN (0, 1)),
+    stats       TEXT                       -- JSON: the step's counts
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_runs_step ON runs(step, started_at);
+
+-- The dashboard's headline numbers each time it is written, for trends.
+CREATE TABLE IF NOT EXISTS metric_snapshots (
+    taken_at TEXT PRIMARY KEY,
+    metrics  TEXT NOT NULL                 -- JSON
+) STRICT;
 """
 
 
