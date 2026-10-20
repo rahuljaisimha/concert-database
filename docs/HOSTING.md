@@ -152,22 +152,25 @@ itself to do this: either would expose the database snapshots too.
 2. **The Worker.** Workers & Pages → Create → Worker, named
    `concertdb-dashboard`, with the code of `deploy/dashboard-worker/worker.js`
    (or `npx wrangler deploy` from that folder). Settings → Bindings → add an
-   R2 bucket binding `BUCKET` → `concert-database`.
-3. **Where it lives.** Either a custom domain (Settings → Domains & Routes →
-   Add → Custom domain, e.g. `concerts.<your domain>`, if the domain is on
-   Cloudflare), or the `*.workers.dev` URL.
-4. **Lock it.** Zero Trust → Access → Applications → Add → Self-hosted:
-   the hostname from step 3, a policy "Allow" with Include → Emails → your
-   address. (For the workers.dev URL, the Worker's Settings → Domains & Routes
-   has a one-click "Enable Cloudflare Access" instead.) Turn off workers.dev
-   if you use a custom domain.
-5. **Tell the Worker which Access app to trust.** From the Access
+   R2 bucket binding `BUCKET` → `concert-database`. It is served at
+   `https://concertdb-dashboard.<your subdomain>.workers.dev`; no domain of
+   your own is needed. Under Settings → Domains & Routes, turn off "Preview
+   URLs" so that is the only address.
+3. **Lock it.** Settings → Domains & Routes → workers.dev → "Enable Cloudflare
+   Access". Then "Manage Cloudflare Access" (or Zero Trust → Access →
+   Applications → the new app): make its policy "Allow" with Include →
+   Emails → your address, and nothing else.
+4. **Tell the Worker which Access app to trust.** From that Access
    application's Overview copy the "Application Audience (AUD) Tag"; in the
    Worker → Settings → Variables add `POLICY_AUD` = that tag and
    `TEAM_DOMAIN` = `https://<team>.cloudflareaccess.com`. The Worker checks
    Access's signed token on every request and answers 403 without it, so a
-   request that gets around Access (a mistake in the policy, the workers.dev
-   URL left on) still sees nothing.
+   request that gets around Access (a mistake in the policy, a preview URL
+   left on) still sees nothing.
+
+With a domain on Cloudflare later, add it under Domains & Routes → Custom
+domain, create a self-hosted Access application for that hostname (same
+policy; update `POLICY_AUD`), and turn off workers.dev.
 
 Open the URL on your phone, enter your email, type the code: the session lasts
 24 hours by default (Access → Applications → your app → session duration).
