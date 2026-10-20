@@ -1,0 +1,11 @@
+# Deploy: cd deploy/dashboard-worker && npx wrangler login && npx wrangler deploy
+# Then put it behind Cloudflare Access (docs/HOSTING.md, "Dashboard on your phone").
+name = "concertdb-dashboard"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+workers_dev = true   # served at https://concertdb-dashboard.<subdomain>.workers.dev
+preview_urls = false # no per-version URLs: one address to put behind Access
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "concert-database"

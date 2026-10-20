@@ -134,3 +134,44 @@ keeps 7 daily and 8 weekly snapshots, and a 30-day rule would delete the
 older weekly ones. If MusicSceneMap later needs a public
 file (e.g. the exported `opened_for` edges), publish it to the existing public
 graph bucket instead.
+
+## Dashboard on your phone
+
+Every run uploads `data/dashboard.html` to the same bucket as
+`dashboards/index.html` (when the `R2_*` variables are set). The bucket stays
+private; a small Cloudflare Worker (`deploy/dashboard-worker/`) serves that one
+object, and nothing else in the bucket, behind Cloudflare Access, so only you
+can open it, from anywhere, even while the PC is off (you see the last upload).
+
+Never turn on the bucket's `r2.dev` URL or attach a custom domain to the bucket
+itself to do this: either would expose the database snapshots too.
+
+1. **Access (sign-in).** Cloudflare dashboard → Zero Trust (the free plan is
+   enough; pick a team name). Settings → Authentication → add "One-time PIN"
+   (a code by email).
+2. **The Worker.** Workers & Pages → Create → Worker, named
+   `concertdb-dashboard`, with the code of `deploy/dashboard-worker/worker.js`
+   (or `npx wrangler deploy` from that folder). Settings → Bindings → add an
+   R2 bucket binding `BUCKET` → `concert-database`. It is served at
+   `https://concertdb-dashboard.<your subdomain>.workers.dev`; no domain of
+   your own is needed. Under Settings → Domains & Routes, turn off "Preview
+   URLs" so that is the only address.
+3. **Lock it.** Settings → Domains & Routes → workers.dev → "Enable Cloudflare
+   Access" (or the "Protect with Cloudflare Access" toggle when deploying).
+   The default policy lets in members of your Cloudflare account; keep the
+   account to yourself, or change the policy to Include → Emails → your
+   address (Zero Trust → Access → Applications).
+
+Access is the only lock on the page itself. If it is ever turned off, the
+dashboard (counts and run summaries) is public, but nothing else: the Worker
+only ever reads `dashboards/index.html`.
+
+With a domain on Cloudflare later, add it under Domains & Routes → Custom
+domain, create a self-hosted Access application for that hostname (same
+policy), and turn off workers.dev.
+
+Open the URL on your phone, enter your email, type the code: the session lasts
+24 hours by default (Access → Applications → your app → session duration).
+The page holds counts and run summaries, no API keys (they are sent in
+headers, never in URLs or error messages). The R2 token in `.env` already
+covers the new prefix; no lifecycle rule is needed (one object, replaced).

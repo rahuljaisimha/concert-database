@@ -239,18 +239,24 @@ def _dashboard_paths(args) -> list[Path]:
     return paths + ([Path(extra)] if extra else [])
 
 
+def _publish_dashboard(args, conn, upload: bool = True) -> None:
+    paths = dashboard.write(conn, _dashboard_paths(args))
+    for p in paths:
+        print(f"dashboard: {p}")
+    if upload and backup.r2_configured():
+        backup.upload_dashboard(paths[0])       # for your phone: see "Dashboard" in docs/HOSTING.md
+
+
 def _write_dashboard(args, conn) -> None:
     """After a scheduled step; a dashboard problem never fails the run."""
     try:
-        for p in dashboard.write(conn, _dashboard_paths(args)):
-            print(f"dashboard: {p}")
+        _publish_dashboard(args, conn)
     except Exception as e:      # noqa: BLE001
-        print(f"dashboard not written: {type(e).__name__}: {e}")
+        print(f"dashboard problem (the run carries on): {type(e).__name__}: {e}")
 
 
 def cmd_dashboard(args):
-    for p in dashboard.write(_conn(args), _dashboard_paths(args)):
-        print(f"wrote {p}")
+    _publish_dashboard(args, _conn(args), upload=not args.no_upload)
 
 
 def cmd_restore(args):
@@ -381,6 +387,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("dashboard", help="write data/dashboard.html (also written after every"
                        " run, gemini and pollstar step; $CONCERTDB_DASHBOARD = a second copy)")
     s.add_argument("--out", help="default: dashboard.html next to the ledger")
+    s.add_argument("--no-upload", action="store_true", help="don't upload it to R2 (dashboards/index.html)")
     s.set_defaults(fn=cmd_dashboard)
 
     s = sub.add_parser("export", help="write opened_for edges for MusicSceneMap")
