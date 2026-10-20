@@ -1,12 +1,10 @@
 # Deploy: cd deploy/dashboard-worker && npx wrangler login && npx wrangler deploy
-# Then set TEAM_DOMAIN and POLICY_AUD under the Worker's Settings → Variables and
-# put it behind Cloudflare Access (docs/HOSTING.md, "Dashboard on your phone").
+# Then put it behind Cloudflare Access (docs/HOSTING.md, "Dashboard on your phone").
 name = "concertdb-dashboard"
 main = "worker.js"
 compatibility_date = "2025-01-01"
 workers_dev = true   # served at https://concertdb-dashboard.<subdomain>.workers.dev
 preview_urls = false # no per-version URLs: one address to put behind Access
-keep_vars = true     # TEAM_DOMAIN / POLICY_AUD are set in the Cloudflare dashboard, not here
 
 [[r2_buckets]]
 binding = "BUCKET"

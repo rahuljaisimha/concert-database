@@ -157,20 +157,18 @@ itself to do this: either would expose the database snapshots too.
    your own is needed. Under Settings → Domains & Routes, turn off "Preview
    URLs" so that is the only address.
 3. **Lock it.** Settings → Domains & Routes → workers.dev → "Enable Cloudflare
-   Access". Then "Manage Cloudflare Access" (or Zero Trust → Access →
-   Applications → the new app): make its policy "Allow" with Include →
-   Emails → your address, and nothing else.
-4. **Tell the Worker which Access app to trust.** From that Access
-   application's Overview copy the "Application Audience (AUD) Tag"; in the
-   Worker → Settings → Variables add `POLICY_AUD` = that tag and
-   `TEAM_DOMAIN` = `https://<team>.cloudflareaccess.com`. The Worker checks
-   Access's signed token on every request and answers 403 without it, so a
-   request that gets around Access (a mistake in the policy, a preview URL
-   left on) still sees nothing.
+   Access" (or the "Protect with Cloudflare Access" toggle when deploying).
+   The default policy lets in members of your Cloudflare account; keep the
+   account to yourself, or change the policy to Include → Emails → your
+   address (Zero Trust → Access → Applications).
+
+Access is the only lock on the page itself. If it is ever turned off, the
+dashboard (counts and run summaries) is public, but nothing else: the Worker
+only ever reads `dashboards/index.html`.
 
 With a domain on Cloudflare later, add it under Domains & Routes → Custom
 domain, create a self-hosted Access application for that hostname (same
-policy; update `POLICY_AUD`), and turn off workers.dev.
+policy), and turn off workers.dev.
 
 Open the URL on your phone, enter your email, type the code: the session lasts
 24 hours by default (Access → Applications → your app → session duration).
