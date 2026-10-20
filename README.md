@@ -104,6 +104,7 @@ concertdb gemini-eval                 # the same, live, on two shows whose bills
 
 concertdb mb-load                     # MusicBrainz names/aliases for matching (now and then; a few minutes)
 concertdb status                      # coverage and progress
+concertdb dashboard                   # data/dashboard.html (also written after every scheduled step)
 concertdb shows "Flat Worms"          # what we know about an artist
 concertdb export --musicbrainz-only   # data/export/opened_for.csv for MusicSceneMap
 ```
@@ -116,6 +117,33 @@ process, logged to `data/pollstar.log`) at 4 am, and `deploy/run-gemini.sh`
 Gemini's free quota resets at midnight Pacific. Windows Task Scheduler via
 WSL (`deploy/windows-task.ps1`) or systemd timers on Linux (`deploy/*.timer`).
 See docs/HOSTING.md.
+
+## Dashboard
+
+`data/dashboard.html` is one self-contained page (open it in a browser; no
+server, no network) rewritten at the end of every `run`, `gemini` and
+`pollstar` step, or on demand with `concertdb dashboard`. Set
+`CONCERTDB_DASHBOARD` to also write a copy somewhere handier (on WSL, e.g.
+`/mnt/c/Users/<you>/concertdb-dashboard.html`).
+
+- **The data**: concerts (past, upcoming, cancelled), artists with concerts
+  and how many are matched to MusicBrainz, acts per concert (0 / 1 / 2 / 3 /
+  4+), concerts with 2+ acts, opened-for pairs (what `export
+  --musicbrainz-only` gives MusicSceneMap), venues, cities and countries,
+  concerts by year, new concerts per day, top countries, what each source
+  contributes, flagged act names to review. Headline numbers show the change
+  over 24 hours and 7 days, and their growth over time.
+- **The runs**: the last run of each step (when, how long, finished or not,
+  what it did), requests per day per source against their limits, the Gemini
+  step's outcomes per run, context.dev credits left and when they run out,
+  new setlists per run, Pollstar's pace and pause, the last good backup, work
+  queues, and the last 40 steps.
+- **Alerts** at the top: no backup in 26 hours, a failed or killed step,
+  Pollstar paused, context.dev credits running out within two weeks, names to
+  review.
+
+Each step is recorded in the `runs` table, and the headline numbers in
+`metric_snapshots` each time the page is written (see docs/ARCHITECTURE.md).
 
 ## Backups
 

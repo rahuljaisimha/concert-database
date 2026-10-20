@@ -846,6 +846,8 @@ class Run:
             state.record_usage(self.conn, CONTEXTDEV, used - 1)
             self.conn.commit()
             self.stats["contextdev_credits"] += used - 1
+        if isinstance(meta.get("credits_remaining"), int):
+            self.stats["contextdev_balance"] = meta["credits_remaining"]   # for the dashboard
         if isinstance(meta.get("credits_remaining"), int) and meta["credits_remaining"] <= 0:
             self.contextdev_on = False
             self.log("  context.dev: no credits left, switched off")

@@ -295,6 +295,7 @@ def capture(conn: sqlite3.Connection, client: Client, max_requests: int = DAILY_
     if until:
         log(f"pollstar: paused until {until} after repeated pushback; skipping")
         stats.pop("_streak"), stats.pop("_clean")
+        stats["paused_until"] = until
         return stats
     adaptive = hasattr(client, "set_interval")
     if adaptive:
@@ -369,6 +370,8 @@ def capture(conn: sqlite3.Connection, client: Client, max_requests: int = DAILY_
         until = pause(conn, pause_hours(conn))
         log(f"pollstar: {len(BACKOFF_SECONDS) + 1} pushbacks in a row ({exc}); paused until {until}")
         conn.commit()
+        stats["blocked"] = str(exc)[:200]
+        stats["paused_until"] = until
     else:
         if stats["_clean"] >= SPEEDUP_AFTER and _meta(conn, "pollstar_pause_hours"):
             db.begin_write(conn)

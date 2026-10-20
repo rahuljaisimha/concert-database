@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Concert database</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s1-soft: #86b6ef;
+  --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b; --good-text: #006300;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s1-soft: #184f95; --good-text: #0ca30c;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s1-soft: #184f95; --good-text: #0ca30c;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1180px; margin: 0 auto; padding: 24px 16px 64px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 16px; }
+h1 { font-size: 22px; margin: 0; font-weight: 600; }
+h2 { font-size: 17px; margin: 36px 0 12px; font-weight: 600; }
+h3 { font-size: 14px; margin: 0 0 2px; font-weight: 600; }
+.sub { color: var(--ink-2); font-size: 13px; margin: 0 0 10px; }
+.muted { color: var(--muted); }
+.grid { display: grid; gap: 12px; }
+.tiles { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+.cols2 { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+.cols3 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.card { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 14px 16px;
+  min-width: 0; position: relative; }
+.hero { grid-column: span 2; }
+.tile .label { color: var(--ink-2); font-size: 13px; }
+.tile .value { font-size: 26px; font-weight: 600; margin-top: 2px; }
+.hero .value { font-size: 48px; line-height: 1.1; }
+.tile .note { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.delta { font-size: 12px; color: var(--ink-2); }
+.delta.up { color: var(--good-text); }
+.alerts { display: grid; gap: 6px; margin: 0 0 8px; padding: 0; list-style: none; }
+.alerts li { display: flex; gap: 8px; align-items: center; background: var(--surface);
+  border: 1px solid var(--ring); border-radius: 8px; padding: 8px 12px; }
+.badge { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px;
+  border-radius: 50%; color: #fff; font-size: 11px; font-weight: 700; flex: none; }
+.lvl { font-size: 12px; color: var(--ink-2); min-width: 56px; }
+svg { display: block; width: 100%; height: auto; overflow: visible; }
+svg text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+svg .val { fill: var(--ink-2); }
+.hit { fill: transparent; cursor: default; }
+.mark:hover, .mark.on { opacity: .75; }
+.tip { position: fixed; pointer-events: none; background: var(--surface); color: var(--ink);
+  border: 1px solid var(--ring); border-radius: 8px; padding: 6px 10px; font-size: 12px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.12); display: none; z-index: 10; max-width: 260px; }
+.tip b { font-size: 14px; }
+.tip .row { display: flex; align-items: center; gap: 6px; }
+.key { display: inline-block; width: 12px; height: 3px; border-radius: 2px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--ink-2); margin: 4px 0 6px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+details { margin-top: 8px; font-size: 12px; }
+summary { color: var(--muted); cursor: pointer; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+th { color: var(--ink-2); font-weight: 600; }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+.scroll { overflow-x: auto; }
+.ok { color: var(--good-text); } .bad { color: var(--critical); }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 13px; }
+.kv dt { color: var(--ink-2); } .kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+@media (max-width: 520px) { .hero { grid-column: span 1; } .hero .value { font-size: 40px; } }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<div class="tip" id="tip"></div>
+<script>
+const DATA = /*DATA*/null;
+(function () {
+  const app = document.getElementById("app");
+  const tip = document.getElementById("tip");
+  const d = DATA.data, r = DATA.runs;
+  const fmt = n => n == null ? "–" : Number(n).toLocaleString();
+  const compact = n => n == null ? "–" : new Intl.NumberFormat(undefined, {notation: "compact", maximumFractionDigits: 1}).format(n);
+  const pct = (a, b) => b ? (100 * a / b).toFixed(1) + "%" : "–";
+  const when = iso => iso ? new Date(iso).toLocaleString(undefined, {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"}) : "–";
+  const dur = (a, b) => { if (!a || !b) return "–"; const m = Math.round((new Date(b) - new Date(a)) / 60000);
+    return m < 60 ? m + " min" : Math.floor(m / 60) + " h " + (m % 60) + " min"; };
+  const NS = "http://www.w3.org/2000/svg";
+  function el(tag, attrs, parent, text) {
+    const e = tag.startsWith("svg:") ? document.createElementNS(NS, tag.slice(4)) : document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v);
+    if (text != null) e.textContent = text;
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  // Tooltip: rows of [value, label, color]; values lead.
+  function showTip(ev, title, rows) {
+    tip.replaceChildren();
+    if (title) el("div", {class: "muted"}, tip, title);
+    for (const [v, lab, color] of rows) {
+      const row = el("div", {class: "row"}, tip);
+      if (color) el("span", {class: "key", style: "background:" + color}, row);
+      el("b", {}, row, v);
+      if (lab) el("span", {class: "muted"}, row, lab);
+    }
+    tip.style.display = "block";
+    const x = Math.min(ev.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
+    const y = Math.min(ev.clientY + 14, window.innerHeight - tip.offsetHeight - 8);
+    tip.style.left = x + "px"; tip.style.top = y + "px";
+  }
+  const hideTip = () => { tip.style.display = "none"; };
+  const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+  // Draw at the card's own width, so text stays 11px however wide the card is.
+  const width = slot => Math.max(240, Math.round(slot.getBoundingClientRect().width));
+  function niceMax(v) { if (v <= 0) return 1; const p = Math.pow(10, Math.floor(Math.log10(v)));
+    for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p; return 10 * p; }
+  function card(parent, title, sub, cls) {
+    const c = el("div", {class: "card " + (cls || "")}, parent);
+    if (title) el("h3", {}, c, title);
+    if (sub) el("p", {class: "sub"}, c, sub);
+    return c;
+  }
+  function table(parent, cols, rows, open) {
+    const det = el("details", open ? {open: ""} : {}, parent);
+    el("summary", {}, det, "Table");
+    const wrap = el("div", {class: "scroll"}, det);
+    const t = el("table", {}, wrap);
+    const hr = el("tr", {}, el("thead", {}, t));
+    cols.forEach(c => el("th", {class: c.n ? "n" : ""}, hr, c.label));
+    const tb = el("tbody", {}, t);
+    rows.forEach(row => { const tr = el("tr", {}, tb);
+      cols.forEach(c => el("td", {class: c.n ? "n" : ""}, tr, c.f ? c.f(row) : row[c.key])); });
+    return det;
+  }
+  // Stacked (or single) columns. series: [{key, label, color}]
+  function drawColumns(parent, rows, series, opts) {
+    opts = opts || {};
+    const W = width(parent), H = opts.h || 180, L = 40, B = 22, T = 14, R = 6;
+    const svg = el("svg:svg", {viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": opts.label || ""}, parent);
+    if (!rows.length) { el("svg:text", {x: W / 2, y: H / 2, "text-anchor": "middle"}, svg, opts.empty || "no data yet"); return svg; }
+    const tot = rows.map(x => series.reduce((a, s) => a + (x[s.key] || 0), 0));
+    const max = niceMax(Math.max(opts.limit || 0, ...tot, 0));
+    const y = v => T + (H - T - B) * (1 - v / max);
+    for (let i = 0; i <= 4; i++) { const v = max * i / 4;
+      el("svg:line", {x1: L, x2: W - R, y1: y(v), y2: y(v), stroke: css("--grid"), "stroke-width": 1}, svg);
+      el("svg:text", {x: L - 6, y: y(v) + 4, "text-anchor": "end"}, svg, compact(v)); }
+    if (opts.limit) el("svg:line", {x1: L, x2: W - R, y1: y(opts.limit), y2: y(opts.limit), stroke: css("--muted"), "stroke-width": 1}, svg);
+    const n = rows.length, slot = (W - L - R) / Math.max(n, 1), bw = Math.min(24, slot - 2);
+    const every = Math.ceil(n / (opts.ticks || 10));
+    const iMax = tot.indexOf(Math.max(...tot));
+    rows.forEach((x, i) => {
+      const cx = L + slot * i + slot / 2; let base = 0;
+      const g = el("svg:g", {class: "mark"}, svg);
+      series.forEach((s, si) => { const v = x[s.key] || 0; if (!v) return;
+        const y0 = y(base), y1 = y(base + v); base += v;
+        const top = si === series.length - 1 || series.slice(si + 1).every(t => !(x[t.key]));
+        const h = Math.max(0, y0 - y1 - (base - v > 0 ? 2 : 0));
+        const rr = top ? Math.min(4, h / 2, bw / 2) : 0;
+        const x0 = cx - bw / 2, yy = y1;
+        const path = `M${x0},${yy + h} V${yy + rr} Q${x0},${yy} ${x0 + rr},${yy} H${x0 + bw - rr} Q${x0 + bw},${yy} ${x0 + bw},${yy + rr} V${yy + h} Z`;
+        el("svg:path", {d: path, fill: (x.future && opts.futureColor) ? opts.futureColor : s.color}, g); });
+      if (i === n - 1 || (i % every === 0 && n - 1 - i >= every * 0.6)) el("svg:text", {x: cx, y: H - 6, "text-anchor": "middle"}, svg,
+        opts.xfmt ? opts.xfmt(x.label) : x.label);
+      if ((opts.labels === "all" || i === iMax || i === n - 1) && tot[i] > 0 && opts.labels !== false)
+        el("svg:text", {x: cx, y: y(tot[i]) - 4, "text-anchor": "middle", class: "val"}, svg, compact(tot[i]));
+      const hit = el("svg:rect", {x: cx - slot / 2, y: T, width: slot, height: H - T - B, class: "hit", tabindex: 0}, svg);
+      const show = ev => { g.classList.add("on"); showTip(ev, opts.tfmt ? opts.tfmt(x.label) : x.label,
+        (series.length > 1 ? [[fmt(tot[i]), "total"]] : []).concat(series.map(s => [fmt(x[s.key] || 0), series.length > 1 ? s.label : (opts.unit || ""), s.color]))); };
+      hit.addEventListener("pointermove", show);
+      hit.addEventListener("focus", e => { const b = hit.getBoundingClientRect(); show({clientX: b.right, clientY: b.top}); });
+      hit.addEventListener("pointerleave", () => { g.classList.remove("on"); hideTip(); });
+      hit.addEventListener("blur", () => { g.classList.remove("on"); hideTip(); });
+    });
+    if (series.length > 1) legend(parent, series, true);
+    return svg;
+  }
+  function legend(parent, series, rect) {
+    const lg = el("div", {class: "legend"});
+    parent.insertBefore(lg, parent.querySelector("svg"));
+    series.forEach(s => { const sp = el("span", {}, lg);
+      el("span", {class: rect ? "sw" : "key", style: "background:" + s.color}, sp); sp.append(s.label); });
+  }
+  // One line over time. pts: [{at, v}]
+  function drawLine(parent, pts, opts) {
+    opts = opts || {};
+    const W = width(parent), H = opts.h || 150, L = 44, B = 22, T = 14, R = 10;
+    const svg = el("svg:svg", {viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": opts.label || ""}, parent);
+    if (pts.length < 2) { el("svg:text", {x: W / 2, y: H / 2, "text-anchor": "middle"}, svg,
+      pts.length ? "one point so far: a trend appears after the next run" : "no data yet"); return; }
+    const xs = pts.map(p => +new Date(p.at)), x0 = Math.min(...xs), x1 = Math.max(...xs);
+    let lo = Math.min(...pts.map(p => p.v)), hi = Math.max(...pts.map(p => p.v), opts.top || 0);
+    if (opts.zero) lo = 0;
+    const span = niceMax((hi - lo) || 1); lo = opts.zero ? 0 : Math.max(0, Math.floor(lo / (span / 4)) * (span / 4));
+    const top = lo + niceMax(hi - lo || 1);
+    const X = t => L + (W - L - R) * (t - x0) / ((x1 - x0) || 1), Y = v => T + (H - T - B) * (1 - (v - lo) / ((top - lo) || 1));
+    for (let i = 0; i <= 4; i++) { const v = lo + (top - lo) * i / 4;
+      el("svg:line", {x1: L, x2: W - R, y1: Y(v), y2: Y(v), stroke: css("--grid")}, svg);
+      el("svg:text", {x: L - 6, y: Y(v) + 4, "text-anchor": "end"}, svg, compact(v)); }
+    [x0, x1].forEach((t, i) => el("svg:text", {x: X(t), y: H - 6, "text-anchor": i ? "end" : "start"}, svg,
+      new Date(t).toLocaleDateString(undefined, {month: "short", day: "numeric"})));
+    const color = opts.color || css("--s1");
+    const dPath = pts.map((p, i) => (i ? "L" : "M") + X(xs[i]).toFixed(1) + "," + Y(p.v).toFixed(1)).join(" ");
+    el("svg:path", {d: dPath + ` L${X(x1)},${Y(lo)} L${X(x0)},${Y(lo)} Z`, fill: color, opacity: 0.1}, svg);
+    el("svg:path", {d: dPath, fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round"}, svg);
+    const last = pts[pts.length - 1];
+    el("svg:circle", {cx: X(x1), cy: Y(last.v), r: 4, fill: color, stroke: css("--surface"), "stroke-width": 2}, svg);
+    el("svg:text", {x: X(x1) - 6, y: Y(last.v) - 8, "text-anchor": "end", class: "val"}, svg, compact(last.v));
+    const cross = el("svg:line", {y1: T, y2: H - B, stroke: css("--axis"), visibility: "hidden"}, svg);
+    const dot = el("svg:circle", {r: 4, fill: color, stroke: css("--surface"), "stroke-width": 2, visibility: "hidden"}, svg);
+    const hit = el("svg:rect", {x: L, y: T, width: W - L - R, height: H - T - B, class: "hit"}, svg);
+    hit.addEventListener("pointermove", ev => {
+      const b = svg.getBoundingClientRect(), t = x0 + (x1 - x0) * ((ev.clientX - b.left) * W / b.width - L) / (W - L - R);
+      let i = 0; xs.forEach((x, j) => { if (Math.abs(x - t) < Math.abs(xs[i] - t)) i = j; });
+      cross.setAttribute("x1", X(xs[i])); cross.setAttribute("x2", X(xs[i])); cross.setAttribute("visibility", "visible");
+      dot.setAttribute("cx", X(xs[i])); dot.setAttribute("cy", Y(pts[i].v)); dot.setAttribute("visibility", "visible");
+      showTip(ev, when(pts[i].at), [[fmt(pts[i].v), opts.unit || "", color]]); });
+    hit.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); hideTip(); });
+  }
+  // Horizontal bars (top N).
+  function drawHbars(parent, rows, key, opts) {
+    const W = width(parent), rowH = 26, L = 120, R = 60, H = rows.length * rowH + 4;
+    const svg = el("svg:svg", {viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": opts.label}, parent);
+    const max = Math.max(...rows.map(x => x[key]), 1);
+    rows.forEach((x, i) => { const y = i * rowH + 4, w = (W - L - R) * x[key] / max, bh = 16;
+      const lab = x.label.length > 18 ? x.label.slice(0, 17) + "…" : x.label;
+      el("svg:text", {x: L - 8, y: y + 12, "text-anchor": "end", class: "val"}, svg, lab);
+      const rr = Math.min(4, w / 2);
+      el("svg:path", {class: "mark", fill: css("--s1"),
+        d: `M${L},${y} H${L + w - rr} Q${L + w},${y} ${L + w},${y + rr} V${y + bh - rr} Q${L + w},${y + bh} ${L + w - rr},${y + bh} H${L} Z`}, svg);
+      el("svg:text", {x: L + w + 6, y: y + 12}, svg, compact(x[key]));
+      const hit = el("svg:rect", {x: 0, y: y - 4, width: W, height: rowH, class: "hit"}, svg);
+      hit.addEventListener("pointermove", ev => showTip(ev, x.label, [[fmt(x[key]), opts.unit]]));
+      hit.addEventListener("pointerleave", hideTip); });
+  }
+  // Charts are drawn once the page is laid out (and again on resize), at their slot's width.
+  const draws = [];
+  const later = draw => (parent, ...a) => { const slot = el("div", {class: "chart"}, parent);
+    const f = () => { slot.replaceChildren(); draw(slot, ...a); }; draws.push(f); return slot; };
+  const columns = later(drawColumns), line = later(drawLine), hbars = later(drawHbars);
+  function tile(parent, label, value, note, deltaKey, cls) {
+    const c = el("div", {class: "card tile " + (cls || "")}, parent);
+    el("div", {class: "label"}, c, label);
+    el("div", {class: "value"}, c, typeof value === "number" ? fmt(value) : value);
+    if (deltaKey) {
+      const parts = [];
+      for (const [p, name] of [["day", "24 h"], ["week", "7 days"]]) {
+        const dd = d.deltas[p]; if (dd && dd[deltaKey] != null) parts.push([dd[deltaKey], name]); }
+      if (parts.length) { const dl = el("div", {}, c);
+        parts.forEach(([v, name], i) => { el("span", {class: "delta" + (v > 0 ? " up" : "")}, dl,
+          (v > 0 ? "+" : v < 0 ? "−" : "±") + fmt(Math.abs(v)) + " in " + name + (i < parts.length - 1 ? " · " : "")); }); }
+    }
+    if (note) el("div", {class: "note"}, c, note);
+    return c;
+  }
+
+  // ---------- header + alerts
+  const head = el("header", {}, app);
+  el("h1", {}, head, "Concert database");
+  el("span", {class: "muted"}, head, "Updated " + when(DATA.generated_at));
+  if (DATA.alerts.length) {
+    const ul = el("ul", {class: "alerts"}, app);
+    const LV = {critical: ["✕", "--critical", "Critical"], serious: ["!", "--serious", "Problem"],
+                warning: ["▲", "--warning", "Warning"], info: ["i", "--s1", "To do"]};
+    DATA.alerts.forEach(a => { const li = el("li", {}, ul), [ic, c, name] = LV[a.level] || LV.info;
+      el("span", {class: "badge", style: "background:var(" + c + ")"}, li, ic);
+      el("span", {class: "lvl"}, li, name); li.append(a.text + (a.at ? " " + when(a.at) : "")); });
+  }
+
+  // ---------- the data
+  el("h2", {}, app, "The data");
+  const tiles = el("div", {class: "grid tiles"}, app);
+  tile(tiles, "Concerts", d.concerts, `${fmt(d.past)} past · ${fmt(d.upcoming)} upcoming · ${fmt(d.cancelled)} cancelled not counted`, "concerts", "hero");
+  tile(tiles, "Artists with concerts", d.artists_with_concerts, `${pct(d.artists_with_concerts_mb, d.artists_with_concerts)} matched to MusicBrainz`, "artists_with_concerts");
+  tile(tiles, "Concerts with 2+ acts", d.concerts_2plus, `${pct(d.concerts_2plus, d.concerts)} of concerts`, "concerts_2plus");
+  tile(tiles, "Opened-for pairs", d.opened_for_pairs, "what MusicSceneMap gets (MusicBrainz acts, conf ≥ 0.4)", "opened_for_pairs");
+  tile(tiles, "Venues", d.venues_with_concerts, `${fmt(d.cities)} cities · ${fmt(d.countries)} countries`, "venues_with_concerts");
+  tile(tiles, "Upcoming concerts", d.upcoming, null, "upcoming");
+  tile(tiles, "Added in the last 7 days", d.added_7d, "new concerts in the ledger");
+  tile(tiles, "Festivals", d.festivals, "kept as lineups, not opened-for");
+
+  const g1 = el("div", {class: "grid cols2", style: "margin-top:12px"}, app);
+  let c = card(g1, "Acts per concert", "How many acts we know for each concert. 1 act usually means the openers are still missing.");
+  columns(c, d.lineup_sizes, [{key: "concerts", label: "Concerts", color: css("--s1")}], {unit: "concerts", label: "Concerts by number of acts", ticks: 5, labels: "all"});
+  table(c, [{label: "Acts", key: "label"}, {label: "Concerts", n: 1, f: x => fmt(x.concerts)}, {label: "Share", n: 1, f: x => pct(x.concerts, d.concerts)}], d.lineup_sizes);
+
+  c = card(g1, "Artists", "Who appears on bills.");
+  const dl = el("dl", {class: "kv"}, c);
+  [["Artists with concerts", d.artists_with_concerts], ["… matched to MusicBrainz", d.artists_with_concerts_mb],
+   ["Headliners", d.headliners], ["Openers", d.openers], ["On a bill with someone else", d.artists_with_shared_bill],
+   ["MusicBrainz artists in the ledger", d.artists_known], ["Names not matched to MusicBrainz", d.artists_unmatched],
+   ["Concerts with an opener", d.concerts_with_opener]]
+    .forEach(([k, v]) => { el("dt", {}, dl, k); el("dd", {}, dl, fmt(v)); });
+  const review = d.names_to_review || {};
+  if (Object.keys(review).length) { el("p", {class: "sub", style: "margin-top:10px"}, c,
+    "Flagged names to review: " + Object.entries(review).map(([k, v]) => `${fmt(v)} ${k}`).join(", ")); }
+
+  c = card(app, "Concerts by year", "Lighter columns are years still ahead.", "");
+  c.style.marginTop = "12px";
+  columns(c, d.by_year, [{key: "concerts", label: "Concerts", color: css("--s1")}],
+    {unit: "concerts", futureColor: css("--s1-soft"), ticks: 10, xfmt: l => l.startsWith("before") ? "<" + l.slice(-4) : "’" + l.slice(2), label: "Concerts by year"});
+  table(c, [{label: "Year", key: "label"}, {label: "Concerts", n: 1, f: x => fmt(x.concerts)}], d.by_year);
+
+  el("h3", {style: "margin:20px 0 8px"}, app, "Growth");
+  const g2 = el("div", {class: "grid cols2"}, app);
+  const trend = d.trend || [];
+  [["concerts", "Concerts"], ["artists_with_concerts", "Artists with concerts"],
+   ["concerts_2plus", "Concerts with 2+ acts"], ["opened_for_pairs", "Opened-for pairs"]].forEach(([k, lab], i) => {
+    const cc = card(g2, lab, "Each time the dashboard was written");
+    line(cc, trend.filter(s => s[k] != null).map(s => ({at: s.at, v: s[k]})), {unit: lab.toLowerCase(), label: lab});
+  });
+  const g3 = el("div", {class: "grid cols2", style: "margin-top:12px"}, app);
+  c = card(g3, "New concerts per day", "Concerts added to the ledger, last 30 days (UTC).");
+  columns(c, d.added_by_day, [{key: "concerts", label: "New concerts", color: css("--s1")}],
+    {unit: "new concerts", ticks: 6, xfmt: l => l.slice(5), label: "New concerts per day"});
+  c = card(g3, "Top countries", "By concerts.");
+  hbars(c, d.top_countries, "concerts", {unit: "concerts", label: "Concerts by country"});
+
+  c = card(app, "Where the data comes from", "Concerts each source has something to say about (one concert can come from several).");
+  c.style.marginTop = "12px";
+  table(c, [{label: "Source", key: "source"}, {label: "Concerts", n: 1, f: x => fmt(x.concerts)},
+    {label: "Artists", n: 1, f: x => fmt(x.artists)}, {label: "Opener claims", n: 1, f: x => fmt(x.opener_claims)}], d.by_source, true);
+
+  // ---------- the runs
+  el("h2", {}, app, "The runs");
+  const latest = el("div", {class: "grid cols3"}, app);
+  const SUM = {
+    setlistfm: s => `${fmt(s.requests)} requests · ${fmt(s.setlists)} setlists · ${fmt(s.new)} new` + (s.rate_limited ? ` · ${s.rate_limited} rate-limited` : ""),
+    gemini: s => `${fmt(s.shows)} shows checked · ${fmt(s.gemini_calls)} Gemini calls · ${fmt(s.searches)} searches · ${fmt(s.discovered)} new shows` + (s.stopped ? ` · stopped: ${s.stopped}` : ""),
+    pollstar: s => s.paused_until && !s.requests ? `paused until ${when(s.paused_until)}` :
+      `${fmt(s.requests)} requests · ${fmt(s.events)} events · ${fmt(s.pushback)} pushbacks` + (s.blocked ? " · blocked" : ""),
+    capture: s => `${fmt(s.pages)} pages · ${fmt(s.events)} events`,
+    backup: s => `${s.bytes ? compact(s.bytes) + "B" : "?"} · ${s.uploaded ? "uploaded to R2" : "local only"}`,
+  };
+  for (const step of ["setlistfm", "gemini", "pollstar", "backup", "capture"]) {
+    const x = r.last[step];
+    const cc = card(latest, {setlistfm: "setlist.fm", gemini: "Search + Gemini", pollstar: "Pollstar", backup: "Backup", capture: "Watched pages"}[step]);
+    if (!x) { el("p", {class: "sub"}, cc, "No run recorded yet."); continue; }
+    const st = !x.finished_at ? ["running or killed", ""] : x.ok ? ["finished", "ok"] : ["failed", "bad"];
+    const p = el("p", {class: "sub"}, cc); p.append(when(x.started_at) + " · " + dur(x.started_at, x.finished_at) + " · ");
+    el("span", {class: st[1]}, p, st[0]);
+    el("div", {}, cc, x.stats.error ? x.stats.error : (SUM[step] || (() => ""))(x.stats));
+  }
+
+  el("h3", {style: "margin:20px 0 8px"}, app, "Requests per day");
+  const g4 = el("div", {class: "grid cols3"}, app);
+  const NAMES = {setlistfm: "setlist.fm", gemini: "Gemini calls", contextdev: "context.dev credits", searxng: "SearXNG searches",
+                 firecrawl: "Firecrawl credits", pollstar: "Pollstar", jsonld: "Watched pages"};
+  for (const [src, vals] of Object.entries(r.usage)) {
+    if (!vals.some(v => v) && !r.limits[src]) continue;
+    const cc = card(g4, NAMES[src] || src, (src === "gemini" ? "Pacific days" : "UTC days") +
+      (r.limits[src] ? ` · line: daily limit ${fmt(r.limits[src])}` : ""));
+    columns(cc, r.usage_days.map((day, i) => ({label: day, v: vals[i]})), [{key: "v", label: NAMES[src], color: css("--s1")}],
+      {unit: "requests", limit: r.limits[src], h: 140, ticks: 4, xfmt: l => l.slice(5), label: NAMES[src] + " per day"});
+  }
+
+  const g5 = el("div", {class: "grid cols2", style: "margin-top:12px"}, app);
+  c = card(g5, "Gemini step: shows checked per run", "What came back for each show asked about.");
+  const OUT = [{key: "specific", label: "Bill confirmed", color: css("--s1")}, {key: "page_only", label: "Tour-wide only", color: css("--s2")},
+               {key: "festival", label: "Festival", color: css("--s3")}, {key: "not_found", label: "Nothing found", color: css("--s4")}];
+  const gr = r.gemini_runs.map(x => ({label: x.started_at, ...x.stats}));
+  columns(c, gr, OUT, {ticks: 6, xfmt: l => new Date(l).toLocaleDateString(undefined, {month: "numeric", day: "numeric"}), tfmt: when, label: "Gemini outcomes per run", empty: "no runs recorded yet"});
+  table(c, [{label: "Run", f: x => when(x.label)}, ...OUT.map(o => ({label: o.label, n: 1, f: x => fmt(x[o.key])})),
+    {label: "New shows", n: 1, f: x => fmt(x.discovered)}, {label: "Names fixed / flagged", n: 1, f: x => `${fmt(x.names_completed)} / ${fmt(x.names_flagged)}`},
+    {label: "Tokens", n: 1, f: x => compact(x.tokens)}, {label: "Stopped", f: x => x.stopped || ""}], gr.slice().reverse());
+
+  c = card(g5, "context.dev credits left", " ");
+  const cd = r.contextdev;
+  c.querySelector(".sub").textContent = cd.balance == null ? "No balance recorded yet (it comes with each search)." :
+    `${fmt(cd.balance)} of ${fmt(cd.start)} left · ${fmt(cd.per_day_7d)} a day over the last week` +
+    (cd.days_left != null ? ` · runs out in about ${fmt(cd.days_left)} days` : "") + ` · cap ${fmt(cd.cap_per_run)} a run`;
+  line(c, cd.history.map(h => ({at: h.at, v: h.balance})), {unit: "credits left", label: "context.dev balance"});
+
+  const g6 = el("div", {class: "grid cols2", style: "margin-top:12px"}, app);
+  c = card(g6, "setlist.fm: new setlists per run", "");
+  columns(c, r.setlistfm_runs.map(x => ({label: x.started_at, v: x.stats.new || 0})), [{key: "v", label: "New setlists", color: css("--s1")}],
+    {unit: "new setlists", ticks: 6, xfmt: l => new Date(l).toLocaleDateString(undefined, {month: "numeric", day: "numeric"}), tfmt: when, label: "New setlists per run", empty: "no runs recorded yet"});
+  c = card(g6, "Pollstar and backup", "");
+  const kv = el("dl", {class: "kv"}, c);
+  const ps = r.pollstar, bk = r.backup;
+  [["Pollstar pace", `${ps.interval.toFixed(1)} s between requests`], ["Pollstar paused", ps.paused_until ? "until " + when(ps.paused_until) : "no"],
+   ["Next pause would be", `${ps.next_pause_hours} h`], ["Pollstar requests today", fmt(ps.requests_today)],
+   ["Last good backup", bk.at ? `${when(bk.at)} (${bk.hours_ago} h ago)` : "none recorded"],
+   ["Backup size", bk.bytes ? compact(bk.bytes) + "B" : "–"], ["Uploaded to R2", bk.uploaded == null ? "–" : bk.uploaded ? "yes" : "no"]]
+    .forEach(([k, v]) => { el("dt", {}, kv, k); el("dd", {}, kv, v); });
+
+  c = card(app, "Work queues", "Units of work per source: due now, ever checked, failing.");
+  c.style.marginTop = "12px";
+  table(c, [{label: "Source", key: "source"}, {label: "Due now", n: 1, f: x => fmt(x.due)}, {label: "Checked", n: 1, f: x => fmt(x.checked)},
+    {label: "Total", n: 1, f: x => fmt(x.total)}, {label: "Failing", n: 1, f: x => fmt(x.failing)}, {label: "Requests today", n: 1, f: x => fmt(x.requests_today)}],
+    Object.entries(r.queues).map(([source, q]) => ({source, ...q})), true);
+  const drawAll = () => draws.forEach(f => f());
+  drawAll();
+  let resizeTimer, lastW = window.innerWidth;
+  window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => {
+    if (window.innerWidth !== lastW) { lastW = window.innerWidth; drawAll(); } }, 150); });
+  if (r.setlistfm_deep_pending) el("p", {class: "sub", style: "margin-top:8px"}, c, `${fmt(r.setlistfm_deep_pending)} setlist.fm artists with older history still to fetch.`);
+
+  c = card(app, "Recent runs", "");
+  c.style.marginTop = "12px";
+  table(c, [{label: "Step", key: "step"}, {label: "Started", f: x => when(x.started_at)}, {label: "Took", f: x => dur(x.started_at, x.finished_at)},
+    {label: "Result", f: x => !x.finished_at ? "running or killed" : x.ok ? "ok" : "failed"},
+    {label: "Summary", f: x => x.stats.error || (SUM[x.step] || (() => ""))(x.stats)}], r.recent);
+  el("p", {class: "sub", style: "margin-top:6px"}, c, `Last ${r.recent.length} steps.`);
+})();
+</script>
+</body>
+</html>
