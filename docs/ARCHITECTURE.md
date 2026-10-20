@@ -232,6 +232,17 @@ Work goes a tour at a time:
    named in the quote or at the top of the page; within the tour's dates ± 14
    days; and the artist has no show that date (or a day off in the same city).
    Claim key `found:<artist>:<date>`, `extra.check` = `discovered`.
+7. Odd act names are kept, never dropped (a wrong name can be recategorised
+   later; a dropped act is lost). A name cut short on the page ("The Blind
+   Shak...") becomes the one full name on the fetched pages that starts with
+   it (`extra.name_check` = `completed`, the original in
+   `extra.name_as_given`), or is kept as written with `name_check` =
+   `truncated` if there is none or more than one. A name that reads like a
+   description rather than an act ("groups from Bay Area Rock Camp for
+   Girls", "special guests", 7+ words) is kept with `name_check` =
+   `description`, unless it matches a MusicBrainz artist. Both stay `name:`
+   artists, so `export --musicbrainz-only` leaves them out. The prompt also
+   asks for act names only, in full.
 
 | Check | Confidence | × weight 0.6 | Exported at the default 0.4? |
 |---|---|---|---|
