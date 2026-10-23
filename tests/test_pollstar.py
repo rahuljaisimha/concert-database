@@ -336,3 +336,24 @@ def test_pauses_double_when_blocked_again(conn, monkeypatch):
     conn.commit()
     pollstar.capture(conn, PacedClient([EV]), log=lambda *_: None)
     assert pollstar.pause_hours(conn) == pollstar.PAUSE_HOURS
+
+
+def test_a_wait_over_five_minutes_ends_the_process(conn, monkeypatch):
+    waits = []
+    monkeypatch.setattr(pollstar, "sleep", waits.append)
+    _watch_zebulon(conn)
+    long_retry = status(429)
+    long_retry.retry_after = 301
+    lines = []
+    stats = pollstar.capture(conn, SequenceClient([status(503), long_retry, EV]), log=lines.append)
+    assert waits == [pollstar.BACKOFF_SECONDS[0]] and stats["requests"] == 2      # no 301 s wait
+    assert "over 300s" in stats["blocked"] and pollstar.paused_until(conn)
+
+
+def test_the_backoff_never_waits_more_than_five_minutes(conn, monkeypatch):
+    waits = []
+    monkeypatch.setattr(pollstar, "sleep", waits.append)
+    _watch_zebulon(conn)
+    stats = pollstar.capture(conn, SequenceClient([status(403)] * 20), log=lambda *_: None)
+    assert waits == [30, 60, 120, 300] and max(waits) <= pollstar.MAX_WAIT_SECONDS
+    assert stats["requests"] == 5 and stats["blocked"]
