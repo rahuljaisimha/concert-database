@@ -49,8 +49,11 @@ can't hide spent quota.
     2): searches SEARCH_INTERVAL apart (free plan: 10 a minute). HTTP 402 (out
     of credits) ends the run. Optional cap: FIRECRAWL_MONTHLY_CREDITS a
     calendar month, --max-credits a run.
-  - Gemini (usage source "gemini", Pacific day): calls MIN_INTERVAL apart, at
-    most DAILY_LIMIT a day. A 429 for the day's quota ends the run.
+  - Gemini (usage sources "gemini" and "gemini:<model>", Pacific day): calls
+    MIN_INTERVAL apart, at most DAILY_LIMIT a day per model. The free tier's
+    daily quota is per model, so a run goes through MODELS in order: when one
+    model's day is spent (DAILY_LIMIT calls, or a 429 for the day's quota) it
+    moves on to the next; when all are spent the run ends.
   - A per-minute 429 (either provider) waits (Retry-After / retryDelay, else
     60 s) and retries, up to RETRIES_429 times; then the run ends. The shows
     stay due.
@@ -92,9 +95,13 @@ SEARXNG_INTERVAL = 15.0     # between SearXNG searches: Google flagged "unusual 
                             # searches a few seconds apart in an afternoon
 SEARXNG_MAX_FAILS = 3       # empty searches in a row (engines down) before falling back to Firecrawl
 MODEL = "gemini-3.5-flash-lite"
+# Tried in order, each with its own free daily quota (GEMINI_MODELS in .env changes the list;
+# GEMINI_MODEL or --model uses just that one). gemini-3.1-flash-lite found the same openers as
+# 3.5 on the eval cases but is often "overloaded" (503, waited out and retried).
+MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
 # Free tier, gemini-3.5-flash-lite: 15 requests/min, 500/day, 250k tokens/min. (gemini-3.8-flash
 # is 1/min and 20/day: too few for this.) A prompt is at most ~15k tokens (MAX_PROMPT_CHARS).
-DAILY_LIMIT = 500           # Gemini calls per Pacific day
+DAILY_LIMIT = 500           # Gemini calls per Pacific day, per model
 MONTHLY_CREDITS = None      # optional Firecrawl cap per calendar month (FIRECRAWL_MONTHLY_CREDITS)
 SEARCH_RESULTS = 10
 SEARCH_CREDITS = 2          # what a 10-result search costs; the response says what it really cost
@@ -466,7 +473,7 @@ def quote_source(quote: str | None, texts: list[dict]) -> dict | None:
 
 class Client:
     def __init__(self, fetcher: Fetcher, search_fetcher: Fetcher, page_fetcher: Fetcher,
-                 key: str, search_key: str | None, model: str | None = None,
+                 key: str, search_key: str | None, model: str | None = None, models=None,
                  searxng_url: str | None = None, searxng_fetcher: Fetcher | None = None,
                  contextdev_key: str | None = None, contextdev_fetcher: Fetcher | None = None,
                  search_order=SEARCH_ORDER, contextdev_max_credits: int = CONTEXTDEV_MAX_CREDITS):
@@ -476,6 +483,7 @@ class Client:
         self.headers = {"x-goog-api-key": key}      # headers, so keys never land in the archive
         self.search_headers = {"Authorization": f"Bearer {search_key}"} if search_key else None
         self.model = model or MODEL
+        self.models = list(models) if models else [self.model]
         self.searxng_url = searxng_url.rstrip("/") if searxng_url else None
         self.searxng_fetcher = searxng_fetcher or search_fetcher
         self.contextdev_headers = {"Authorization": f"Bearer {contextdev_key}"} if contextdev_key else None
@@ -529,6 +537,16 @@ class Client:
         return self.page_fetcher.get(PAGES, url, keep_raw=False)
 
 
+def configured_models(model: str | None = None, env=None) -> list[str]:
+    """The models a run goes through: --model or GEMINI_MODEL alone, else GEMINI_MODELS, else MODELS."""
+    env = os.environ if env is None else env
+    one = model or env.get("GEMINI_MODEL")
+    if one:
+        return [one.strip()]
+    listed = [m.strip() for m in (env.get("GEMINI_MODELS") or "").split(",") if m.strip()]
+    return listed or list(MODELS)
+
+
 def client_from_env(data_dir, model: str | None = None, env=None) -> "Client":
     """The client the CLI, smoke test and eval use: GEMINI_API_KEY, plus SEARXNG_URL
     and/or FIRECRAWL_API_KEY for search."""
@@ -545,7 +563,7 @@ def client_from_env(data_dir, model: str | None = None, env=None) -> "Client":
     return Client(Fetcher(data_dir, min_interval=MIN_INTERVAL),
                   Fetcher(data_dir, min_interval=SEARCH_INTERVAL),
                   Fetcher(data_dir, min_interval=PAGE_INTERVAL),
-                  key, search_key, model=model or env.get("GEMINI_MODEL") or None,
+                  key, search_key, models=configured_models(model, env),
                   searxng_url=searxng_url, searxng_fetcher=Fetcher(data_dir, min_interval=SEARXNG_INTERVAL),
                   contextdev_key=contextdev_key, contextdev_fetcher=Fetcher(data_dir, min_interval=CONTEXTDEV_INTERVAL),
                   search_order=order,
@@ -724,12 +742,23 @@ class Stop(Exception):
     """Ends the run: a quota is spent."""
 
 
+class ModelSpent(Stop):
+    """A Gemini model's daily quota is spent: the run moves on to the next model, if any."""
+
+
+def model_usage(model: str) -> str:
+    """The usage source counting one model's calls against its own daily quota."""
+    return f"{SOURCE}:{model}"
+
+
 class Run:
     def __init__(self, conn, client, max_requests, max_credits, monthly_credits, max_acts, log):
         self.conn, self.client, self.log = conn, client, log
         self.max_requests, self.max_credits = max_requests, max_credits
         self.monthly, self.max_acts = monthly_credits, max_acts
-        self.model = client.model or MODEL
+        self.models = list(getattr(client, "models", None) or [client.model or MODEL])
+        self.model = self.models[0]
+        self.spent: set[str] = set()          # models whose daily quota a 429 said is spent
         self.searxng_on = bool(getattr(client, "searxng_url", None))
         self.searxng_fails = 0
         self.firecrawl_on = getattr(client, "has_firecrawl", True)
@@ -737,7 +766,8 @@ class Run:
         self.contextdev_fails = 0
         self.contextdev_cap = getattr(client, "contextdev_max_credits", CONTEXTDEV_MAX_CREDITS)
         self.order = tuple(getattr(client, "search_order", SEARCH_ORDER))
-        self.stats = {"model": self.model, "tours": 0, "shows": 0, "searches": 0, "searxng": 0,
+        self.stats = {"model": ",".join(self.models), "calls_by_model": {},
+                      "tours": 0, "shows": 0, "searches": 0, "searxng": 0,
                       "contextdev": 0, "contextdev_credits": 0, "credits": 0,
                       "pages": 0, "gemini_calls": 0, "tokens": 0, "specific": 0, "page_only": 0,
                       "not_found": 0, "festival": 0, "discovered": 0,
@@ -755,9 +785,22 @@ class Run:
             left.append(self.monthly - credits_this_month(self.conn))
         return min(left)
 
+    def model_left(self, model: str) -> int:
+        return 0 if model in self.spent else DAILY_LIMIT - state.requests_today(self.conn, model_usage(model))
+
+    def pick_model(self) -> bool:
+        """Use the first model (in order) with calls left today; False if there is none."""
+        for m in self.models:
+            if self.model_left(m) > 0:
+                if m != self.model:
+                    self.log(f"  gemini: {self.model} is done for today, switching to {m}")
+                    self.model = m
+                return True
+        return False
+
     def calls_left(self) -> int:
-        return min(self.max_requests - self.stats["gemini_calls"],
-                   DAILY_LIMIT - state.requests_today(self.conn, SOURCE))
+        run_left = math.inf if self.max_requests is None else self.max_requests - self.stats["gemini_calls"]
+        return min(run_left, self.model_left(self.model)) if self.pick_model() else 0
 
     def can_afford(self, searches: int) -> bool:
         if self.calls_left() < 1:
@@ -777,7 +820,10 @@ class Run:
             if resp.status != 429:
                 return resp
             wait = retry_wait(resp)
-            if (name == "Gemini" and daily_quota_spent(resp)) or wait > MAX_WAIT_429 or attempt == RETRIES_429:
+            if name == "Gemini" and daily_quota_spent(resp):
+                self.log(f"  gemini ({self.model}): HTTP 429 {resp.text[:300]}")
+                raise ModelSpent(f"Gemini HTTP 429 (quota spent: {self.model})")
+            if wait > MAX_WAIT_429 or attempt == RETRIES_429:
                 self.log(f"  {name.lower()}: HTTP 429 {resp.text[:300]}")
                 raise Stop(f"{name} HTTP 429 (quota spent)")
             self.log(f"  {name.lower()}: HTTP 429, waiting {wait:.0f}s")
@@ -924,11 +970,21 @@ class Run:
     def ask(self, artist: str, shows: list[dict], pages: list[dict], snippets: list[dict]) -> dict | None:
         prompt = build_prompt(artist, shows, [{"url": p["url"], "excerpt": excerpts(p["text"], shows)}
                                               for p in pages], snippets)
-        db.begin_write(self.conn)
-        state.record_usage(self.conn, SOURCE)
-        self.conn.commit()
-        self.stats["gemini_calls"] += 1
-        resp = self.call(lambda: self.client.generate(self.model, prompt), "Gemini")
+        while True:
+            if not self.pick_model():
+                raise Stop("Gemini HTTP 429 (quota spent)")
+            model = self.model
+            db.begin_write(self.conn)
+            state.record_usage(self.conn, SOURCE)               # all models: the dashboard's total
+            state.record_usage(self.conn, model_usage(model))   # this model's own daily quota
+            self.conn.commit()
+            self.stats["gemini_calls"] += 1
+            self.stats["calls_by_model"][model] = self.stats["calls_by_model"].get(model, 0) + 1
+            try:
+                resp = self.call(lambda: self.client.generate(model, prompt), "Gemini")
+                break
+            except ModelSpent:
+                self.spent.add(model)       # the next pick_model() moves on, or ends the run
         if resp.status != 200:
             raise requests.RequestException(f"Gemini HTTP {resp.status} {resp.text[:200]}")
         r = read_response(resp.json())
@@ -1161,7 +1217,7 @@ class Run:
             self.log(f"    NEW show {o['date']} {o['venue']}, {o['city'] or '?'}: {', '.join(stored)}")
 
 
-def ask(conn: sqlite3.Connection, client: Client, max_requests: int = DAILY_LIMIT,
+def ask(conn: sqlite3.Connection, client: Client, max_requests: int | None = None,
         max_credits: int | None = None, monthly_credits: int | None = MONTHLY_CREDITS,
         max_acts: int = MAX_ACTS, log=print) -> dict:
     """Spend search credits and Gemini calls on due shows, a tour at a time, until a

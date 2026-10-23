@@ -119,3 +119,30 @@ def test_a_failed_upload_never_fails_a_run(tmp_path, monkeypatch, capsys):
     cli.main(["--db", str(tmp_path / "ledger.sqlite"), "run", "--no-backup", "--pollstar-requests", "0"])
     assert "dashboard problem (the run carries on): OSError: offline" in capsys.readouterr().out
     assert (tmp_path / "dashboard.html").exists()
+
+
+
+def test_a_step_still_running_is_told_apart_from_a_killed_one(tmp_path):
+    from concertdb import db
+    conn = db.connect(tmp_path / "ledger.sqlite")
+    lock = tmp_path / "ledger.pollstar.lock"
+    lock.write_text("")
+    conn.execute("INSERT INTO runs (step, started_at) VALUES ('pollstar', '2000-01-01T00:00:00+00:00')")
+    conn.execute("INSERT INTO runs (step, started_at) VALUES ('gemini', '2000-01-01T00:00:00+00:00')")
+    conn.commit()
+    proc = tmp_path / "locks"
+    proc.write_text(f"1: FLOCK  ADVISORY  WRITE 7209 08:20:{lock.stat().st_ino} 0 EOF\n"
+                    "2: POSIX  ADVISORY  WRITE 99 08:20:1 0 EOF\n")
+    assert dashboard.held_locks(conn, str(proc)) == {"pollstar"}
+    import concertdb.dashboard as d
+    real = d.held_locks
+    d.held_locks = lambda c: real(c, str(proc))
+    try:
+        info = dashboard.collect(conn, snapshot=False)
+    finally:
+        d.held_locks = real
+    assert info["runs"]["last"]["pollstar"]["running"] is True
+    assert info["runs"]["last"]["gemini"]["running"] is False
+    texts = [a["text"] for a in info["alerts"]]
+    assert "Last gemini run stopped without finishing (killed?)" in texts
+    assert not any("pollstar run stopped" in t for t in texts)

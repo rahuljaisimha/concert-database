@@ -213,8 +213,8 @@ an act from the MusicSceneMap graph and at most `GEMINI_MAX_ACTS` acts listed
 first, then the most recent shows (pages about them are easiest to find).
 
 Gemini's own Google Search grounding isn't on the free tier for current models,
-so the search is done here and Gemini (default `gemini-3.5-flash-lite`, no
-tools) only reads text we fetched. Search goes, in `SEARCH_ORDER` (default
+so the search is done here and Gemini (`gemini-3.5-flash-lite`, then
+`gemini-3.1-flash-lite`; no tools) only reads text we fetched. Search goes, in `SEARCH_ORDER` (default
 `contextdev,searxng`), to context.dev's search API and a local SearXNG, each
 while it answers, then to Firecrawl's search API.
 Work goes a tour at a time:
@@ -305,10 +305,16 @@ sent.
   2; the free plan has 1,000 a month): searches 6.5 s apart (free plan: 10 a
   minute). HTTP 402 (out of credits) ends the run. Optional caps:
   `FIRECRAWL_MONTHLY_CREDITS` a calendar month, `--max-credits` a run.
-- Gemini (`usage` source `gemini`, Pacific day): free tier for
-  `gemini-3.5-flash-lite` is 15 requests/min, 500/day, 250k tokens/min; calls
-  go 4.5 s apart, at most 500 a day (`--max-requests` a run), prompts ≤ ~15k
-  tokens. A 429 for the day's quota ends the run. (`gemini-3.8-flash` is
+- Gemini (`usage` sources `gemini`, all models, and `gemini:<model>`, Pacific
+  day): the free tier's quota is per model; `gemini-3.5-flash-lite` and
+  `gemini-3.1-flash-lite` are each 15 requests/min, 500/day, 250k tokens/min.
+  A run uses the models in order (`GEMINI_MODELS`; `GEMINI_MODEL` or `--model`
+  for just one): when one has made 500 calls today, or Gemini answers 429 for
+  its day's quota, the run moves on to the next, and ends when all are spent
+  (`--max-requests` caps a run). Calls go 4.5 s apart, prompts ≤ ~15k tokens.
+  3.1 found the same openers as 3.5 on the eval cases but answers "overloaded"
+  (503) more often; those are waited out like any 503 (below). Claims record
+  which model answered (`extra.model`). (`gemini-3.8-flash` is
   1/min and 20/day on the free tier: too few for this.) 1,000 Firecrawl
   credits need ~300–350 Gemini calls, so a month's credits fit in one day.
 - A per-minute 429 from either waits (`Retry-After` / `retryDelay`, else 60 s)

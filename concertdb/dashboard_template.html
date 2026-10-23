@@ -347,7 +347,8 @@ const DATA = /*DATA*/null;
     const x = r.last[step];
     const cc = card(latest, {setlistfm: "setlist.fm", gemini: "Search + Gemini", pollstar: "Pollstar", backup: "Backup", capture: "Watched pages"}[step]);
     if (!x) { el("p", {class: "sub"}, cc, "No run recorded yet."); continue; }
-    const st = !x.finished_at ? ["running or killed", ""] : x.ok ? ["finished", "ok"] : ["failed", "bad"];
+    const st = !x.finished_at ? (x.running ? ["running", ""] : x.running === false ? ["stopped without finishing", "bad"] : ["running or killed", ""])
+      : x.ok ? ["finished", "ok"] : ["failed", "bad"];
     const p = el("p", {class: "sub"}, cc); p.append(when(x.started_at) + " · " + dur(x.started_at, x.finished_at) + " · ");
     el("span", {class: st[1]}, p, st[0]);
     el("div", {}, cc, x.stats.error ? x.stats.error : (SUM[step] || (() => ""))(x.stats));
@@ -373,7 +374,8 @@ const DATA = /*DATA*/null;
   columns(c, gr, OUT, {ticks: 6, xfmt: l => new Date(l).toLocaleDateString(undefined, {month: "numeric", day: "numeric"}), tfmt: when, label: "Gemini outcomes per run", empty: "no runs recorded yet"});
   table(c, [{label: "Run", f: x => when(x.label)}, ...OUT.map(o => ({label: o.label, n: 1, f: x => fmt(x[o.key])})),
     {label: "New shows", n: 1, f: x => fmt(x.discovered)}, {label: "Names fixed / flagged", n: 1, f: x => `${fmt(x.names_completed)} / ${fmt(x.names_flagged)}`},
-    {label: "Tokens", n: 1, f: x => compact(x.tokens)}, {label: "Stopped", f: x => x.stopped || ""}], gr.slice().reverse());
+    {label: "Tokens", n: 1, f: x => compact(x.tokens)},
+    {label: "Calls by model", f: x => Object.entries(x.calls_by_model || {}).map(([m, n]) => `${m.replace("gemini-", "")}: ${fmt(n)}`).join(", ")}, {label: "Stopped", f: x => x.stopped || ""}], gr.slice().reverse());
 
   c = card(g5, "context.dev credits left", " ");
   const cd = r.contextdev;
@@ -410,7 +412,7 @@ const DATA = /*DATA*/null;
   c = card(app, "Recent runs", "");
   c.style.marginTop = "12px";
   table(c, [{label: "Step", key: "step"}, {label: "Started", f: x => when(x.started_at)}, {label: "Took", f: x => dur(x.started_at, x.finished_at)},
-    {label: "Result", f: x => !x.finished_at ? "running or killed" : x.ok ? "ok" : "failed"},
+    {label: "Result", f: x => !x.finished_at ? (x.running ? "running" : x.running === false ? "stopped" : "unfinished") : x.ok ? "ok" : "failed"},
     {label: "Summary", f: x => x.stats.error || (SUM[x.step] || (() => ""))(x.stats)}], r.recent);
   el("p", {class: "sub", style: "margin-top:6px"}, c, `Last ${r.recent.length} steps.`);
 })();

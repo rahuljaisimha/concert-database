@@ -8,6 +8,7 @@ step, and by `concertdb dashboard`.
 """
 
 import json
+import os
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -22,6 +23,9 @@ NEW_SHOW_DAYS = 30
 YEARS_SHOWN = 30
 BACKUP_STALE_HOURS = 26
 CONTEXTDEV_START = 51_000           # the free credits context.dev gave us (for the balance chart)
+# The process locks (cli._lock) a step runs under: Pollstar inside `run` or as its own process.
+STEP_LOCKS = {"pollstar": ("pollstar", "crawl"), "gemini": ("gemini",), "setlistfm": ("crawl",),
+              "capture": ("crawl",), "backup": ("crawl",)}
 # The headline numbers kept in metric_snapshots, for the trend charts and deltas.
 HEADLINE = ["concerts", "artists_with_concerts", "concerts_2plus", "opened_for_pairs",
             "venues_with_concerts", "upcoming"]
@@ -121,12 +125,42 @@ def _before(snaps: list[dict], at: datetime) -> dict | None:
     return older[-1] if older else None
 
 
+def held_locks(conn: sqlite3.Connection, proc_locks: str = "/proc/locks") -> set[str] | None:
+    """Which of the ledger's process locks are held right now, read from /proc/locks so
+    nothing is locked (a probe that took the lock could make a starting run exit).
+    None where that isn't available (not Linux, an in-memory ledger)."""
+    main = next((r["file"] for r in conn.execute("PRAGMA database_list") if r["name"] == "main"), "")
+    if not main or not os.path.exists(proc_locks):
+        return None
+    db_path = Path(main)
+    inodes = {}
+    for name in {n for names in STEP_LOCKS.values() for n in names}:
+        p = db_path.with_name(f"{db_path.stem}.{name}.lock")
+        if p.exists():
+            inodes[p.stat().st_ino] = name
+    held = set()
+    for line in Path(proc_locks).read_text().splitlines():
+        parts = line.split()
+        if len(parts) > 5 and parts[1] == "FLOCK" and ":" in parts[5]:
+            try:
+                ino = int(parts[5].rsplit(":", 1)[1])
+            except ValueError:
+                continue
+            if ino in inodes:
+                held.add(inodes[ino])
+    return held
+
+
 def run_metrics(conn: sqlite3.Connection) -> dict:
     """The developer side: the steps' runs, requests per day, credits, queues."""
     r = {}
     recent = runs.recent(conn, limit=400)
     r["recent"] = recent[:40]
     r["last"] = {step: next((x for x in recent if x["step"] == step), None) for step in STEPS}
+    held = held_locks(conn)
+    for step, x in r["last"].items():         # only a step's latest run can still be going
+        if x and not x["finished_at"]:
+            x["running"] = None if held is None else any(n in held for n in STEP_LOCKS.get(step, ()))
     r["gemini_runs"] = [x for x in recent if x["step"] == "gemini" and x["finished_at"]][:20][::-1]
     r["setlistfm_runs"] = [x for x in recent if x["step"] == "setlistfm" and x["finished_at"]][:30][::-1]
 
@@ -136,7 +170,7 @@ def run_metrics(conn: sqlite3.Connection) -> dict:
         used.setdefault(row["source"], {})[row["day"]] = row["requests"]
     r["usage_days"] = days
     r["usage"] = {src: [used.get(src, {}).get(d, 0) for d in days] for src in USAGE_SOURCES}
-    r["limits"] = {"setlistfm": 1400, "gemini": gemini.DAILY_LIMIT}
+    r["limits"] = {"setlistfm": 1400, "gemini": gemini.DAILY_LIMIT * len(gemini.configured_models())}
 
     bal = [{"at": x["finished_at"], "balance": x["stats"]["contextdev_balance"]}
            for x in recent if x["step"] == "gemini" and isinstance(x["stats"].get("contextdev_balance"), int)][::-1]
@@ -175,9 +209,10 @@ def alerts(d: dict, r: dict) -> list[dict]:
     for step, x in r["last"].items():
         if x and x["finished_at"] and not x["ok"]:
             out.append({"level": "serious", "text": f"Last {step} run failed: {x['stats'].get('error', '?')}"})
-        elif x and not x["finished_at"] and \
-                (_now() - datetime.fromisoformat(x["started_at"])) > timedelta(hours=12):
-            out.append({"level": "serious", "text": f"Last {step} run never finished (killed?)"})
+        elif x and not x["finished_at"] and (x.get("running") is False or (
+                x.get("running") is None
+                and _now() - datetime.fromisoformat(x["started_at"]) > timedelta(hours=12))):
+            out.append({"level": "serious", "text": f"Last {step} run stopped without finishing (killed?)"})
     if r["pollstar"]["paused_until"]:
         out.append({"level": "warning", "text": "Pollstar paused until", "at": r["pollstar"]["paused_until"]})
     cd = r["contextdev"]

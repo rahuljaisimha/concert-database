@@ -385,6 +385,64 @@ def test_gemini_daily_limit(conn, monkeypatch):
     assert len(client.prompts) == 1 and stats["stopped"] == "budget spent"
 
 
+
+class TwoModelClient(FakeClient):
+    models = ["model-a", "model-b"]
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.used = []
+
+    def generate(self, model, prompt):
+        self.used.append(model)
+        return super().generate(model, prompt)
+
+
+DAY_SPENT = '{"error": {"details": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}}'
+
+
+def test_a_spent_model_hands_over_to_the_next(conn):
+    ty_tour(conn)
+    client = TwoModelClient([], searches=ty_client().searches, pages=ty_client().pages)
+    client.answers = [Response(429, DAY_SPENT, None, None, None), answer(TOUR_ANSWER), answer(METRO_ANSWER)]
+    stats = gemini.ask(conn, client, **QUIET)
+    assert client.used == ["model-a", "model-b", "model-b"]          # the same prompt again, on model-b
+    assert stats["specific"] == 3 and stats["stopped"] is None
+    assert stats["calls_by_model"] == {"model-a": 1, "model-b": 2} and stats["model"] == "model-a,model-b"
+    assert state.requests_today(conn, "gemini:model-b") == 2 and state.requests_today(conn, "gemini") == 3
+    c = conn.execute("SELECT extra FROM claims WHERE source = 'gemini' LIMIT 1").fetchone()
+    assert json.loads(c["extra"])["model"] == "model-b"
+
+
+def test_the_run_ends_when_every_model_is_spent(conn):
+    ty_tour(conn)
+    client = TwoModelClient([Response(429, DAY_SPENT, None, None, None)] * 2,
+                            searches=ty_client().searches, pages=ty_client().pages)
+    stats = gemini.ask(conn, client, **QUIET)
+    assert client.used == ["model-a", "model-b"] and stats["stopped"] == "Gemini HTTP 429 (quota spent)"
+    assert len(state.due(conn, "gemini")) == 3
+
+
+def test_each_model_has_its_own_daily_limit(conn, monkeypatch):
+    monkeypatch.setattr(gemini, "DAILY_LIMIT", 1)
+    ty_show(conn, "2026-03-02", "The Metro", "Sydney")
+    ty_show(conn, "2025-03-02", "The Metro", "Sydney", OTHER, "Pigface")
+    ty_show(conn, "2024-03-02", "The Metro", "Sydney", "third", "Third Band")
+    empty = answer({"shows": []})
+    client = TwoModelClient([empty, empty, empty], searches={"Metro": web((METRO_URL, "Ty Segall", ""))})
+    stats = gemini.ask(conn, client, **QUIET)
+    assert client.used == ["model-a", "model-b"] and stats["stopped"] == "budget spent"
+    # Tomorrow's run starts on model-a again; today both are done.
+    assert gemini.Run(conn, client, None, None, None, 1, print).calls_left() == 0
+
+
+def test_which_models(monkeypatch):
+    assert gemini.configured_models(env={}) == list(gemini.MODELS)
+    assert gemini.configured_models(env={"GEMINI_MODELS": " x , y "}) == ["x", "y"]
+    assert gemini.configured_models(env={"GEMINI_MODELS": "x,y", "GEMINI_MODEL": "z"}) == ["z"]
+    assert gemini.configured_models("w", env={"GEMINI_MODELS": "x,y"}) == ["w"]
+    assert state.usage_day("gemini:model-b") == state.usage_day("gemini")       # Pacific day too
+
 def test_errors_back_off(conn):
     ty_tour(conn)
     stats = gemini.ask(conn, FakeClient([], searches={"tour": requests.ConnectionError()}), **QUIET)

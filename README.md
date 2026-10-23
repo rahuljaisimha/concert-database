@@ -97,7 +97,8 @@ concertdb pollstar
 
 # Find openers of past shows with only one act listed: web search (context.dev,
 # a local SearXNG via deploy/searxng.sh, then Firecrawl) + Gemini, a tour at a time
-# (needs GEMINI_API_KEY and one of CONTEXT_DEV_API_KEY, SEARXNG_URL, FIRECRAWL_API_KEY; stops at a quota;
+# (needs GEMINI_API_KEY and one of CONTEXT_DEV_API_KEY, SEARXNG_URL, FIRECRAWL_API_KEY; 500 calls a day
+# on each of GEMINI_MODELS in turn, then stops;
 # can run while `concertdb run` is running; GEMINI_MAX_ACTS / --max-acts widens it)
 concertdb gemini
 concertdb gemini-eval                 # the same, live, on two shows whose bills we know (--all: every case)
