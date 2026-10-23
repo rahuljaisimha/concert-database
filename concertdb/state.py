@@ -133,7 +133,8 @@ def mark_failed(conn: sqlite3.Connection, source: str, key: str) -> None:
 def usage_day(source: str, now: datetime | None = None) -> date:
     """The day a source's daily quota counts against."""
     now = now or _now()
-    return now.astimezone(PACIFIC).date() if source in PACIFIC_DAY_SOURCES else now.date()
+    pacific = source.split(":", 1)[0] in PACIFIC_DAY_SOURCES      # "gemini:<model>" too
+    return now.astimezone(PACIFIC).date() if pacific else now.date()
 
 
 def record_usage(conn: sqlite3.Connection, source: str, requests: int = 1, usd: float = 0.0) -> None:

@@ -347,7 +347,8 @@ const DATA = /*DATA*/null;
     const x = r.last[step];
     const cc = card(latest, {setlistfm: "setlist.fm", gemini: "Search + Gemini", pollstar: "Pollstar", backup: "Backup", capture: "Watched pages"}[step]);
     if (!x) { el("p", {class: "sub"}, cc, "No run recorded yet."); continue; }
-    const st = !x.finished_at ? ["running or killed", ""] : x.ok ? ["finished", "ok"] : ["failed", "bad"];
+    const st = !x.finished_at ? (x.running ? ["running", ""] : x.running === false ? ["stopped without finishing", "bad"] : ["running or killed", ""])
+      : x.ok ? ["finished", "ok"] : ["failed", "bad"];
     const p = el("p", {class: "sub"}, cc); p.append(when(x.started_at) + " · " + dur(x.started_at, x.finished_at) + " · ");
     el("span", {class: st[1]}, p, st[0]);
     el("div", {}, cc, x.stats.error ? x.stats.error : (SUM[step] || (() => ""))(x.stats));
@@ -357,8 +358,18 @@ const DATA = /*DATA*/null;
   const g4 = el("div", {class: "grid cols3"}, app);
   const NAMES = {setlistfm: "setlist.fm", gemini: "Gemini calls", contextdev: "context.dev credits", searxng: "SearXNG searches",
                  firecrawl: "Firecrawl credits", pollstar: "Pollstar", jsonld: "Watched pages"};
+  const gm = r.gemini_models;
+  const MODEL_COLORS = ["--s1", "--s2", "--s3", "--s4"];
+  const modelSeries = gm.models.map((m, i) => ({key: m, label: m.replace("gemini-", ""), color: css(MODEL_COLORS[i % 4])}))
+    .concat(gm.has_earlier ? [{key: "_earlier", label: "before the per-model count", color: css("--axis")}] : []);
   for (const [src, vals] of Object.entries(r.usage)) {
     if (!vals.some(v => v) && !r.limits[src]) continue;
+    if (src === "gemini") {      // stacked by model; the line is every model's limit together
+      const cc = card(g4, "Gemini calls by model", `Pacific days · line: ${fmt(gm.limit)} a day × ${gm.models.length} models`);
+      columns(cc, gm.days, modelSeries, {unit: "calls", limit: r.limits.gemini, h: 140, ticks: 4,
+        xfmt: l => l.slice(5), label: "Gemini calls per day by model"});
+      continue;
+    }
     const cc = card(g4, NAMES[src] || src, (src === "gemini" ? "Pacific days" : "UTC days") +
       (r.limits[src] ? ` · line: daily limit ${fmt(r.limits[src])}` : ""));
     columns(cc, r.usage_days.map((day, i) => ({label: day, v: vals[i]})), [{key: "v", label: NAMES[src], color: css("--s1")}],
@@ -373,16 +384,33 @@ const DATA = /*DATA*/null;
   columns(c, gr, OUT, {ticks: 6, xfmt: l => new Date(l).toLocaleDateString(undefined, {month: "numeric", day: "numeric"}), tfmt: when, label: "Gemini outcomes per run", empty: "no runs recorded yet"});
   table(c, [{label: "Run", f: x => when(x.label)}, ...OUT.map(o => ({label: o.label, n: 1, f: x => fmt(x[o.key])})),
     {label: "New shows", n: 1, f: x => fmt(x.discovered)}, {label: "Names fixed / flagged", n: 1, f: x => `${fmt(x.names_completed)} / ${fmt(x.names_flagged)}`},
-    {label: "Tokens", n: 1, f: x => compact(x.tokens)}, {label: "Stopped", f: x => x.stopped || ""}], gr.slice().reverse());
+    {label: "Tokens", n: 1, f: x => compact(x.tokens)},
+    {label: "Calls by model", f: x => Object.entries(x.calls_by_model || {}).map(([m, n]) => `${m.replace("gemini-", "")}: ${fmt(n)}`).join(", ")}, {label: "Stopped", f: x => x.stopped || ""}], gr.slice().reverse());
 
-  c = card(g5, "context.dev credits left", " ");
+  c = card(g5, "Gemini calls per run, by model", "Each run starts on the first model and moves to the next when its day is spent.");
+  const runsByModel = r.gemini_runs.map(x => ({label: x.started_at, ...(x.stats.calls_by_model || {}),
+    _earlier: x.stats.calls_by_model ? 0 : (x.stats.gemini_calls || 0)}));
+  const runSeries = modelSeries.filter(s => s.key !== "_earlier")
+    .concat(runsByModel.some(x => x._earlier) ? [{key: "_earlier", label: "before the per-model count", color: css("--axis")}] : []);
+  columns(c, runsByModel, runSeries, {ticks: 6, xfmt: l => new Date(l).toLocaleDateString(undefined, {month: "numeric", day: "numeric"}),
+    tfmt: when, label: "Gemini calls per run by model", empty: "no runs recorded yet"});
+
+  c = card(app, "Gemini models, last 7 days", "Calls and tokens per model, and what its answers added: shows whose openers it confirmed (from a quote naming the show, or from tour-wide pages only) and shows it found that we didn't have.");
+  c.style.marginTop = "12px";
+  table(c, [{label: "Model", f: x => x.model}, {label: "Calls", n: 1, f: x => fmt(x.calls)},
+    {label: "Tokens", n: 1, f: x => x.tokens == null ? "–" : compact(x.tokens)},
+    {label: "Tokens per call", n: 1, f: x => x.tokens_per_call == null ? "–" : fmt(x.tokens_per_call)},
+    {label: "Bills confirmed", n: 1, f: x => fmt(x.specific)}, {label: "Tour-wide only", n: 1, f: x => fmt(x.page)},
+    {label: "New shows", n: 1, f: x => fmt(x.discovered)}], gm.week, true);
+
+  const g6 = el("div", {class: "grid cols2", style: "margin-top:12px"}, app);
+  c = card(g6, "context.dev credits left", " ");
   const cd = r.contextdev;
   c.querySelector(".sub").textContent = cd.balance == null ? "No balance recorded yet (it comes with each search)." :
     `${fmt(cd.balance)} of ${fmt(cd.start)} left · ${fmt(cd.per_day_7d)} a day over the last week` +
     (cd.days_left != null ? ` · runs out in about ${fmt(cd.days_left)} days` : "") + ` · cap ${fmt(cd.cap_per_run)} a run`;
   line(c, cd.history.map(h => ({at: h.at, v: h.balance})), {unit: "credits left", label: "context.dev balance"});
 
-  const g6 = el("div", {class: "grid cols2", style: "margin-top:12px"}, app);
   c = card(g6, "setlist.fm: new setlists per run", "");
   columns(c, r.setlistfm_runs.map(x => ({label: x.started_at, v: x.stats.new || 0})), [{key: "v", label: "New setlists", color: css("--s1")}],
     {unit: "new setlists", ticks: 6, xfmt: l => new Date(l).toLocaleDateString(undefined, {month: "numeric", day: "numeric"}), tfmt: when, label: "New setlists per run", empty: "no runs recorded yet"});
@@ -410,7 +438,7 @@ const DATA = /*DATA*/null;
   c = card(app, "Recent runs", "");
   c.style.marginTop = "12px";
   table(c, [{label: "Step", key: "step"}, {label: "Started", f: x => when(x.started_at)}, {label: "Took", f: x => dur(x.started_at, x.finished_at)},
-    {label: "Result", f: x => !x.finished_at ? "running or killed" : x.ok ? "ok" : "failed"},
+    {label: "Result", f: x => !x.finished_at ? (x.running ? "running" : x.running === false ? "stopped" : "unfinished") : x.ok ? "ok" : "failed"},
     {label: "Summary", f: x => x.stats.error || (SUM[x.step] || (() => ""))(x.stats)}], r.recent);
   el("p", {class: "sub", style: "margin-top:6px"}, c, `Last ${r.recent.length} steps.`);
 })();

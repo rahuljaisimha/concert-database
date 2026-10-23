@@ -351,11 +351,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("gemini", help="find openers of shows that lack one: Firecrawl search,"
                        " fetched pages, Gemini reads them (a tour at a time)")
-    s.add_argument("--max-requests", type=int, default=gemini.DAILY_LIMIT, help="Gemini calls this run")
+    s.add_argument("--max-requests", type=int, default=None,
+                   help=f"Gemini calls this run (default: until every model's {gemini.DAILY_LIMIT} a day are spent)")
     s.add_argument("--max-credits", type=int, default=None,
                    help="Firecrawl credits this run (default: no cap; the run stops when Firecrawl"
                         " is out of credits, or at $FIRECRAWL_MONTHLY_CREDITS a calendar month if set)")
-    s.add_argument("--model", help=f"default: $GEMINI_MODEL, else {gemini.MODEL}")
+    s.add_argument("--model", help="just this model (default: $GEMINI_MODEL, else $GEMINI_MODELS in order,"
+                   f" else {', '.join(gemini.MODELS)})")
     s.add_argument("--max-acts", type=int, default=int(os.environ.get("GEMINI_MAX_ACTS") or gemini.MAX_ACTS),
                    help="only ask about shows with at most this many acts listed"
                         f" (default: $GEMINI_MAX_ACTS, else {gemini.MAX_ACTS})")

@@ -8,6 +8,7 @@ step, and by `concertdb dashboard`.
 """
 
 import json
+import os
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -22,6 +23,9 @@ NEW_SHOW_DAYS = 30
 YEARS_SHOWN = 30
 BACKUP_STALE_HOURS = 26
 CONTEXTDEV_START = 51_000           # the free credits context.dev gave us (for the balance chart)
+# The process locks (cli._lock) a step runs under: Pollstar inside `run` or as its own process.
+STEP_LOCKS = {"pollstar": ("pollstar", "crawl"), "gemini": ("gemini",), "setlistfm": ("crawl",),
+              "capture": ("crawl",), "backup": ("crawl",)}
 # The headline numbers kept in metric_snapshots, for the trend charts and deltas.
 HEADLINE = ["concerts", "artists_with_concerts", "concerts_2plus", "opened_for_pairs",
             "venues_with_concerts", "upcoming"]
@@ -121,12 +125,83 @@ def _before(snaps: list[dict], at: datetime) -> dict | None:
     return older[-1] if older else None
 
 
+def held_locks(conn: sqlite3.Connection, proc_locks: str = "/proc/locks") -> set[str] | None:
+    """Which of the ledger's process locks are held right now, read from /proc/locks so
+    nothing is locked (a probe that took the lock could make a starting run exit).
+    None where that isn't available (not Linux, an in-memory ledger)."""
+    main = next((r["file"] for r in conn.execute("PRAGMA database_list") if r["name"] == "main"), "")
+    if not main or not os.path.exists(proc_locks):
+        return None
+    db_path = Path(main)
+    inodes = {}
+    for name in {n for names in STEP_LOCKS.values() for n in names}:
+        p = db_path.with_name(f"{db_path.stem}.{name}.lock")
+        if p.exists():
+            inodes[p.stat().st_ino] = name
+    held = set()
+    for line in Path(proc_locks).read_text().splitlines():
+        parts = line.split()
+        if len(parts) > 5 and parts[1] == "FLOCK" and ":" in parts[5]:
+            try:
+                ino = int(parts[5].rsplit(":", 1)[1])
+            except ValueError:
+                continue
+            if ino in inodes:
+                held.add(inodes[ino])
+    return held
+
+
+MODEL_DAYS = 7
+
+
+def gemini_models(conn: sqlite3.Connection, used: dict, days: list[str], recent: list[dict]) -> dict:
+    """Gemini calls per day by model, and per model over the last MODEL_DAYS days: calls,
+    tokens, and what its answers added (shows whose bill it confirmed, shows it found)."""
+    configured = gemini.configured_models()
+    seen = [s.split(":", 1)[1] for s in used if s.startswith(f"{gemini.SOURCE}:")]
+    models = configured + sorted(m for m in set(seen) if m not in configured)
+    per_day = {m: [used.get(gemini.model_usage(m), {}).get(d, 0) for d in days] for m in models}
+    total = [used.get(gemini.SOURCE, {}).get(d, 0) for d in days]
+    # Calls from before calls were counted per model (or by an eval with GEMINI_MODEL).
+    earlier = [max(0, t - sum(per_day[m][i] for m in models)) for i, t in enumerate(total)]
+    rows = [{"label": d, **{m: per_day[m][i] for m in models}, "_earlier": earlier[i]} for i, d in enumerate(days)]
+
+    since = (_now() - timedelta(days=MODEL_DAYS)).isoformat()
+    week_days = days[-MODEL_DAYS:]
+    found = {r["m"]: dict(r) for r in conn.execute(
+        "SELECT json_extract(extra, '$.model') AS m,"
+        " COUNT(DISTINCT CASE WHEN json_extract(extra, '$.check') = 'specific' THEN show_id END) AS specific,"
+        " COUNT(DISTINCT CASE WHEN json_extract(extra, '$.check') = 'page' THEN show_id END) AS page,"
+        " COUNT(DISTINCT CASE WHEN json_extract(extra, '$.check') = 'discovered' THEN show_id END) AS discovered"
+        " FROM claims WHERE source = ? AND seen_at >= ? AND role != 'headliner' GROUP BY m",
+        (gemini.SOURCE, since))}
+    tokens = {}
+    for x in recent:
+        if x["step"] == "gemini" and x["started_at"] >= since:
+            for m, n in (x["stats"].get("tokens_by_model") or {}).items():
+                tokens[m] = tokens.get(m, 0) + n
+    table = []
+    for m in models:
+        calls = sum(per_day[m][days.index(d)] for d in week_days)
+        f = found.get(m, {})
+        table.append({"model": m, "calls": calls, "tokens": tokens.get(m), "tokens_per_call":
+                      round(tokens[m] / calls) if tokens.get(m) and calls else None,
+                      "specific": f.get("specific", 0), "page": f.get("page", 0),
+                      "discovered": f.get("discovered", 0)})
+    return {"models": models, "days": rows, "has_earlier": any(earlier), "week": table,
+            "limit": gemini.DAILY_LIMIT}
+
+
 def run_metrics(conn: sqlite3.Connection) -> dict:
     """The developer side: the steps' runs, requests per day, credits, queues."""
     r = {}
     recent = runs.recent(conn, limit=400)
     r["recent"] = recent[:40]
     r["last"] = {step: next((x for x in recent if x["step"] == step), None) for step in STEPS}
+    held = held_locks(conn)
+    for step, x in r["last"].items():         # only a step's latest run can still be going
+        if x and not x["finished_at"]:
+            x["running"] = None if held is None else any(n in held for n in STEP_LOCKS.get(step, ()))
     r["gemini_runs"] = [x for x in recent if x["step"] == "gemini" and x["finished_at"]][:20][::-1]
     r["setlistfm_runs"] = [x for x in recent if x["step"] == "setlistfm" and x["finished_at"]][:30][::-1]
 
@@ -136,7 +211,8 @@ def run_metrics(conn: sqlite3.Connection) -> dict:
         used.setdefault(row["source"], {})[row["day"]] = row["requests"]
     r["usage_days"] = days
     r["usage"] = {src: [used.get(src, {}).get(d, 0) for d in days] for src in USAGE_SOURCES}
-    r["limits"] = {"setlistfm": 1400, "gemini": gemini.DAILY_LIMIT}
+    r["gemini_models"] = gemini_models(conn, used, days, recent)
+    r["limits"] = {"setlistfm": 1400, "gemini": gemini.DAILY_LIMIT * len(gemini.configured_models())}
 
     bal = [{"at": x["finished_at"], "balance": x["stats"]["contextdev_balance"]}
            for x in recent if x["step"] == "gemini" and isinstance(x["stats"].get("contextdev_balance"), int)][::-1]
@@ -175,9 +251,10 @@ def alerts(d: dict, r: dict) -> list[dict]:
     for step, x in r["last"].items():
         if x and x["finished_at"] and not x["ok"]:
             out.append({"level": "serious", "text": f"Last {step} run failed: {x['stats'].get('error', '?')}"})
-        elif x and not x["finished_at"] and \
-                (_now() - datetime.fromisoformat(x["started_at"])) > timedelta(hours=12):
-            out.append({"level": "serious", "text": f"Last {step} run never finished (killed?)"})
+        elif x and not x["finished_at"] and (x.get("running") is False or (
+                x.get("running") is None
+                and _now() - datetime.fromisoformat(x["started_at"]) > timedelta(hours=12))):
+            out.append({"level": "serious", "text": f"Last {step} run stopped without finishing (killed?)"})
     if r["pollstar"]["paused_until"]:
         out.append({"level": "warning", "text": "Pollstar paused until", "at": r["pollstar"]["paused_until"]})
     cd = r["contextdev"]
