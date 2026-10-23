@@ -187,9 +187,11 @@ about, on a schedule, with tight limits:
   (~9 minutes), two nights running. Now requests start 6 s apart
   (`POLLSTAR_INTERVAL`, also the floor); pushback (HTTP 403, 429, 503 or a
   network error) doubles the interval (up to 120 s), waits (`Retry-After`, else
-  30 s, 60 s, 120 s, 300 s, 600 s) and retries; 300 clean requests in a row
+  30 s, 60 s, 120 s, 300 s) and retries; 300 clean requests in a row
   take 20% off the interval, down to the floor
-- six pushbacks in a row pause Pollstar for every process, so a block isn't
+- the process ends as soon as a wait would be longer than 5 minutes
+  (`MAX_WAIT_SECONDS`): a fifth pushback in a row, or a `Retry-After` over
+  300 s. That also pauses Pollstar for every process, so a block isn't
   made worse: 12 hours, doubling each time it happens again (up to a week),
   back to 12 hours after a run with 300 clean requests
 - the due list is re-read every 200 units and newly found venues are queued

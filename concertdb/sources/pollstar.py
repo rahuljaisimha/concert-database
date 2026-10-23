@@ -14,9 +14,10 @@ two nights running, so the pace adapts and is remembered between runs:
     it starts at, and never goes below, POLL_INTERVAL (POLLSTAR_INTERVAL in
     .env, default 6 s), at most DAILY_LIMIT a day (POLLSTAR_DAILY_LIMIT)
   - pushback (HTTP 403, 429, 503 or a network error) doubles the interval (up to
-    MAX_INTERVAL), waits (Retry-After, else BACKOFF_SECONDS: 30 s doubling to
-    600 s) and retries; SPEEDUP_AFTER clean requests in a row take 20% off it
-  - len(BACKOFF_SECONDS) + 1 pushbacks in a row pause Pollstar for every
+    MAX_INTERVAL), waits (Retry-After, else BACKOFF_SECONDS: 30 s, 60 s, 120 s,
+    300 s) and retries; SPEEDUP_AFTER clean requests in a row take 20% off it
+  - a wait longer than MAX_WAIT_SECONDS (5 min: the fifth pushback in a row,
+    or a longer Retry-After) ends the process and pauses Pollstar for every
     process: 12 h, doubling each time it happens again (up to a week), back to
     12 h after a run with SPEEDUP_AFTER clean requests
   - a venue's name is looked up once; the match (or no-match) is stored and
@@ -36,6 +37,7 @@ processes can share the database (see db.begin_write).
 import hashlib
 import html
 import json
+import math
 import os
 import sqlite3
 import time
@@ -57,10 +59,12 @@ SLOWDOWN = 2.0              # interval x this after pushback
 SPEEDUP = 0.8               # interval x this after SPEEDUP_AFTER clean requests in a row
 SPEEDUP_AFTER = 300
 # Pollstar has no published limit, so treat these as "slow down": wait, slow
-# down, retry. After len(BACKOFF_SECONDS) in a row, stop rather than risk the
-# IP being blocked for longer.
+# down, retry. When the next wait (the backoff, Retry-After, or the pace between
+# requests) would be longer than MAX_WAIT_SECONDS, stop (and pause) rather than
+# risk the IP being blocked for longer.
 PUSHBACK_STATUSES = (403, 429, 503)
-BACKOFF_SECONDS = (30, 60, 120, 300, 600)
+BACKOFF_SECONDS = (30, 60, 120, 300)
+MAX_WAIT_SECONDS = 300      # 5 min: any longer wait ends the process
 PAUSE_HOURS = 12            # after being stopped, no Pollstar requests from any process
 MAX_PAUSE_HOURS = 7 * 24
 sleep = time.sleep          # replaced in tests
@@ -334,10 +338,13 @@ def capture(conn: sqlite3.Connection, client: Client, max_requests: int = DAILY_
             streak = stats["_streak"]
             stats["pushback"] += 1
             stats["_clean"] = 0
-            if streak >= len(BACKOFF_SECONDS):
-                raise Blocked(why)
-            wait = max((resp.retry_after if resp is not None else None) or 0, BACKOFF_SECONDS[streak])
+            backoff = BACKOFF_SECONDS[streak] if streak < len(BACKOFF_SECONDS) else math.inf
+            wait = max((resp.retry_after if resp is not None else None) or 0, backoff)
+            if wait > MAX_WAIT_SECONDS:
+                raise Blocked(f"{why}; the next wait would be over {MAX_WAIT_SECONDS}s")
             interval = client.slow_down() if hasattr(client, "slow_down") else None
+            if interval and interval > MAX_WAIT_SECONDS:
+                raise Blocked(f"{why}; {interval:.0f}s between requests is over the {MAX_WAIT_SECONDS}s limit")
             if adaptive and interval:
                 remember(interval)
             log(f"  pollstar: {why}; waiting {wait:.0f}s"
@@ -368,7 +375,7 @@ def capture(conn: sqlite3.Connection, client: Client, max_requests: int = DAILY_
                 conn.commit()
     except Blocked as exc:
         until = pause(conn, pause_hours(conn))
-        log(f"pollstar: {len(BACKOFF_SECONDS) + 1} pushbacks in a row ({exc}); paused until {until}")
+        log(f"pollstar: stopping ({exc}); paused until {until}")
         conn.commit()
         stats["blocked"] = str(exc)[:200]
         stats["paused_until"] = until
