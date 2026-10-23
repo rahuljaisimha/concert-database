@@ -766,7 +766,7 @@ class Run:
         self.contextdev_fails = 0
         self.contextdev_cap = getattr(client, "contextdev_max_credits", CONTEXTDEV_MAX_CREDITS)
         self.order = tuple(getattr(client, "search_order", SEARCH_ORDER))
-        self.stats = {"model": ",".join(self.models), "calls_by_model": {},
+        self.stats = {"model": ",".join(self.models), "calls_by_model": {}, "tokens_by_model": {},
                       "tours": 0, "shows": 0, "searches": 0, "searxng": 0,
                       "contextdev": 0, "contextdev_credits": 0, "credits": 0,
                       "pages": 0, "gemini_calls": 0, "tokens": 0, "specific": 0, "page_only": 0,
@@ -989,6 +989,7 @@ class Run:
             raise requests.RequestException(f"Gemini HTTP {resp.status} {resp.text[:200]}")
         r = read_response(resp.json())
         self.stats["tokens"] += r["tokens"]
+        self.stats["tokens_by_model"][model] = self.stats["tokens_by_model"].get(model, 0) + r["tokens"]
         answer = parse_answer(r["text"])
         if answer is None:
             self.log(f"  gemini: no JSON answer (finishReason {r['finish']})")

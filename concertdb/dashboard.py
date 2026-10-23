@@ -151,6 +151,47 @@ def held_locks(conn: sqlite3.Connection, proc_locks: str = "/proc/locks") -> set
     return held
 
 
+MODEL_DAYS = 7
+
+
+def gemini_models(conn: sqlite3.Connection, used: dict, days: list[str], recent: list[dict]) -> dict:
+    """Gemini calls per day by model, and per model over the last MODEL_DAYS days: calls,
+    tokens, and what its answers added (shows whose bill it confirmed, shows it found)."""
+    configured = gemini.configured_models()
+    seen = [s.split(":", 1)[1] for s in used if s.startswith(f"{gemini.SOURCE}:")]
+    models = configured + sorted(m for m in set(seen) if m not in configured)
+    per_day = {m: [used.get(gemini.model_usage(m), {}).get(d, 0) for d in days] for m in models}
+    total = [used.get(gemini.SOURCE, {}).get(d, 0) for d in days]
+    # Calls from before calls were counted per model (or by an eval with GEMINI_MODEL).
+    earlier = [max(0, t - sum(per_day[m][i] for m in models)) for i, t in enumerate(total)]
+    rows = [{"label": d, **{m: per_day[m][i] for m in models}, "_earlier": earlier[i]} for i, d in enumerate(days)]
+
+    since = (_now() - timedelta(days=MODEL_DAYS)).isoformat()
+    week_days = days[-MODEL_DAYS:]
+    found = {r["m"]: dict(r) for r in conn.execute(
+        "SELECT json_extract(extra, '$.model') AS m,"
+        " COUNT(DISTINCT CASE WHEN json_extract(extra, '$.check') = 'specific' THEN show_id END) AS specific,"
+        " COUNT(DISTINCT CASE WHEN json_extract(extra, '$.check') = 'page' THEN show_id END) AS page,"
+        " COUNT(DISTINCT CASE WHEN json_extract(extra, '$.check') = 'discovered' THEN show_id END) AS discovered"
+        " FROM claims WHERE source = ? AND seen_at >= ? AND role != 'headliner' GROUP BY m",
+        (gemini.SOURCE, since))}
+    tokens = {}
+    for x in recent:
+        if x["step"] == "gemini" and x["started_at"] >= since:
+            for m, n in (x["stats"].get("tokens_by_model") or {}).items():
+                tokens[m] = tokens.get(m, 0) + n
+    table = []
+    for m in models:
+        calls = sum(per_day[m][days.index(d)] for d in week_days)
+        f = found.get(m, {})
+        table.append({"model": m, "calls": calls, "tokens": tokens.get(m), "tokens_per_call":
+                      round(tokens[m] / calls) if tokens.get(m) and calls else None,
+                      "specific": f.get("specific", 0), "page": f.get("page", 0),
+                      "discovered": f.get("discovered", 0)})
+    return {"models": models, "days": rows, "has_earlier": any(earlier), "week": table,
+            "limit": gemini.DAILY_LIMIT}
+
+
 def run_metrics(conn: sqlite3.Connection) -> dict:
     """The developer side: the steps' runs, requests per day, credits, queues."""
     r = {}
@@ -170,6 +211,7 @@ def run_metrics(conn: sqlite3.Connection) -> dict:
         used.setdefault(row["source"], {})[row["day"]] = row["requests"]
     r["usage_days"] = days
     r["usage"] = {src: [used.get(src, {}).get(d, 0) for d in days] for src in USAGE_SOURCES}
+    r["gemini_models"] = gemini_models(conn, used, days, recent)
     r["limits"] = {"setlistfm": 1400, "gemini": gemini.DAILY_LIMIT * len(gemini.configured_models())}
 
     bal = [{"at": x["finished_at"], "balance": x["stats"]["contextdev_balance"]}

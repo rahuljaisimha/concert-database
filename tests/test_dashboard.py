@@ -146,3 +146,28 @@ def test_a_step_still_running_is_told_apart_from_a_killed_one(tmp_path):
     texts = [a["text"] for a in info["alerts"]]
     assert "Last gemini run stopped without finishing (killed?)" in texts
     assert not any("pollstar run stopped" in t for t in texts)
+
+
+def test_gemini_calls_by_model(conn, monkeypatch):
+    from concertdb import state
+    from concertdb.sources import gemini
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    monkeypatch.setenv("GEMINI_MODELS", "model-a,model-b")
+    day = state.usage_day("gemini").isoformat()
+    for src, n in (("gemini", 700), ("gemini:model-a", 500), ("gemini:model-b", 150)):
+        conn.execute("INSERT INTO usage (day, source, requests) VALUES (?, ?, ?)", (day, src, n))
+    show_id = show(conn, "2024-09-17", "Zebulon", ["Iguana Death Cult"])
+    aid = ledger.get_or_create_artist(conn, "Flat Worms")
+    ledger.add_claim(conn, show_id, aid, "gemini", "show:1", role="opener", confidence=0.8,
+                     extra={"model": "model-b", "check": "specific"})
+    conn.commit()
+    runs.record(conn, "gemini", lambda: {"gemini_calls": 650, "calls_by_model": {"model-a": 500, "model-b": 150},
+                                         "tokens_by_model": {"model-a": 3_000_000, "model-b": 900_000}})
+    gm = dashboard.collect(conn, snapshot=False)["runs"]["gemini_models"]
+    assert gm["models"] == ["model-a", "model-b"] and gm["has_earlier"]
+    today = gm["days"][-1]
+    assert (today["model-a"], today["model-b"], today["_earlier"]) == (500, 150, 50)
+    a, b = gm["week"]
+    assert (a["calls"], a["tokens"], a["tokens_per_call"]) == (500, 3_000_000, 6000)
+    assert (b["calls"], b["specific"], b["page"]) == (150, 1, 0)
+    assert dashboard.collect(conn, snapshot=False)["runs"]["limits"]["gemini"] == 2 * gemini.DAILY_LIMIT
