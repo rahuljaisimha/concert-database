@@ -79,6 +79,28 @@ td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
 .ok { color: var(--good-text); } .bad { color: var(--critical); }
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 13px; }
 .kv dt { color: var(--ink-2); } .kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+.alerts a { color: inherit; }
+details.review-card { margin-top: 12px; font-size: inherit; scroll-margin-top: 12px; }
+.review-card > summary { list-style: none; cursor: pointer; color: inherit; display: flex; flex-wrap: wrap;
+  align-items: baseline; gap: 2px 10px; min-height: 44px; align-content: center; }
+.review-card > summary::-webkit-details-marker { display: none; }
+.review-card > summary::before { content: "▸"; color: var(--muted); width: 12px; }
+.review-card[open] > summary::before { content: "▾"; }
+.review-card > summary h3 { margin: 0; }
+.review-card > summary .sub { margin: 0; flex: 1 1 200px; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.review-card[open] > summary .sub { display: none; }
+.review-item { border-top: 1px solid var(--grid); padding: 10px 0; }
+.review-item:first-of-type { border-top: 0; }
+.review-item .nm { font-weight: 600; overflow-wrap: anywhere; }
+.review-item ul { margin: 6px 0; padding-left: 18px; font-size: 13px; }
+.review-item li { margin: 2px 0; overflow-wrap: anywhere; }
+.review-item q { color: var(--ink-2); }
+.cmds { display: grid; gap: 4px; margin-top: 6px; }
+.cmd { display: block; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--bg);
+  border: 1px solid var(--grid); border-radius: 6px; padding: 6px 8px; overflow-wrap: anywhere;
+  white-space: pre-wrap; user-select: all; -webkit-user-select: all; }
+.cmd .what { color: var(--muted); user-select: none; -webkit-user-select: none; }
 @media (max-width: 520px) { .hero { grid-column: span 1; } .hero .value { font-size: 40px; } }
 </style>
 </head>
@@ -275,7 +297,9 @@ const DATA = /*DATA*/null;
                 warning: ["▲", "--warning", "Warning"], info: ["i", "--s1", "To do"]};
     DATA.alerts.forEach(a => { const li = el("li", {}, ul), [ic, c, name] = LV[a.level] || LV.info;
       el("span", {class: "badge", style: "background:var(" + c + ")"}, li, ic);
-      el("span", {class: "lvl"}, li, name); li.append(a.text + (a.at ? " " + when(a.at) : "")); });
+      el("span", {class: "lvl"}, li, name);
+      const text = a.text + (a.at ? " " + when(a.at) : "");
+      if (a.href) el("a", {href: a.href}, li, text); else li.append(text); });
   }
 
   // ---------- the data
@@ -303,8 +327,43 @@ const DATA = /*DATA*/null;
    ["Concerts with an opener", d.concerts_with_opener]]
     .forEach(([k, v]) => { el("dt", {}, dl, k); el("dd", {}, dl, fmt(v)); });
   const review = d.names_to_review || {};
-  if (Object.keys(review).length) { el("p", {class: "sub", style: "margin-top:10px"}, c,
-    "Flagged names to review: " + Object.entries(review).map(([k, v]) => `${fmt(v)} ${k}`).join(", ")); }
+  if (Object.keys(review).length) { const p = el("p", {class: "sub", style: "margin-top:10px"}, c);
+    el("a", {href: "#review"}, p, "Flagged names to review: " + Object.entries(review).map(([k, v]) => `${fmt(v)} ${k}`).join(", ")); }
+
+  // ---------- flagged act names (concertdb/review.py): what to check, and the command for each outcome
+  const flagged = DATA.review || [];
+  if (flagged.length) {
+    // Collapsed until clicked, or opened by the alert's #review link.
+    const box = el("details", {class: "card review-card", id: "review"}, app);
+    const sm = el("summary", {}, box);
+    el("h3", {}, sm, `Names to review (${fmt(flagged.length)})`);
+    el("span", {class: "sub"}, sm, flagged.map(x => x.name).join(" · "));
+    c = el("div", {}, box);
+    el("p", {class: "sub"}, c, "Act names the Gemini step kept but wasn't sure of. Check the page, then run one " +
+      "command on the crawler machine (in WSL); it updates this dashboard.");
+    const openReview = () => { if (location.hash === "#review") { box.open = true; box.scrollIntoView({block: "start"}); } };
+    window.addEventListener("hashchange", openReview);
+    setTimeout(openReview, 0);
+    document.querySelectorAll('a[href="#review"]').forEach(a => a.addEventListener("click", () => { box.open = true; }));
+    const WHY = {truncated: "cut short on the page", description: "reads like a description, not a name"};
+    const q = s => /["$`\\!]/.test(s) ? "'" + s.replace(/'/g, "'\\''") + "'" : '"' + s + '"';
+    flagged.forEach(x => {
+      const it = el("div", {class: "review-item"}, c);
+      el("div", {class: "nm"}, it, x.name);
+      el("div", {class: "sub"}, it, WHY[x.flag] || x.flag);
+      const ul = el("ul", {}, it);
+      x.shows.forEach(s => { const li = el("li", {}, ul);
+        const bill = s.role === "opener" && s.headliners.length ? " for " + s.headliners.join(", ") : "";
+        li.append(`${s.date} · ${[s.venue, s.city, s.country].filter(Boolean).join(", ")} · ${s.role}${bill} `);
+        if (s.url) el("a", {href: s.url, target: "_blank", rel: "noopener noreferrer"}, li, "page");
+        if (s.quote) { li.append(" "); el("q", {}, li, s.quote.length > 160 ? s.quote.slice(0, 160) + "…" : s.quote); } });
+      const cmds = el("div", {class: "cmds"}, it), n = q(x.name), base = "~/concert-database/deploy/review.sh ";
+      [["keep", "name is right", `keep ${n}`], ["rename", "fix the name", `rename ${n} ${q(x.suggestion || "NEW NAME")}`],
+       ["mbid", "it's this MusicBrainz artist", `mbid ${n} MBID`], ["delete", "not an act", `delete ${n}`]]
+        .forEach(([_, what, cmd]) => { const code = el("code", {class: "cmd"}, cmds);
+          el("span", {class: "what"}, code, "# " + what + "\n"); code.append(base + cmd); });
+    });
+  }
 
   c = card(app, "Concerts by year", "Lighter columns are years still ahead.", "");
   c.style.marginTop = "12px";

@@ -261,6 +261,12 @@ Work goes a tour at a time:
    `description`, unless it matches a MusicBrainz artist. Both stay `name:`
    artists, so `export --musicbrainz-only` leaves them out. The prompt also
    asks for act names only, in full.
+   `concertdb review` (`deploy/review.sh`, linked from the dashboard's alert)
+   settles each flagged name: `keep` (`name_check` becomes `kept`), `rename`
+   or `mbid` (every claim of the flagged artist moves to the right artist,
+   `name_check` becomes `renamed`, the page's name stays in `name_as_given`,
+   and the unused `name:` artist goes), or `delete` (its claims go; a show
+   left with none goes too). See concertdb/review.py.
 
 | Check | Confidence | × weight 0.6 | Exported at the default 0.4? |
 |---|---|---|---|
