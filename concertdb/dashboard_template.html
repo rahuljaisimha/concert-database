@@ -395,7 +395,8 @@ const DATA = /*DATA*/null;
   el("h2", {}, app, "The runs");
   const latest = el("div", {class: "grid cols3"}, app);
   const SUM = {
-    setlistfm: s => `${fmt(s.requests)} requests · ${fmt(s.setlists)} setlists · ${fmt(s.new)} new` + (s.rate_limited ? ` · ${s.rate_limited} rate-limited` : ""),
+    setlistfm: s => `${fmt(s.requests)} requests · ${fmt(s.setlists)} setlists · ${fmt(s.new)} new` + (s.rate_limited ? ` · ${s.rate_limited} rate-limited` : "")
+      + (s.network_errors ? ` · ${s.network_errors} network errors` : "") + (s.stopped ? ` · stopped: ${s.stopped}` : ""),
     gemini: s => `${fmt(s.shows)} shows checked · ${fmt(s.gemini_calls)} Gemini calls · ${fmt(s.searches)} searches · ${fmt(s.discovered)} new shows` + (s.stopped ? ` · stopped: ${s.stopped}` : ""),
     pollstar: s => s.paused_until && !s.requests ? `paused until ${when(s.paused_until)}` :
       `${fmt(s.requests)} requests · ${fmt(s.events)} events · ${fmt(s.pushback)} pushbacks` + (s.blocked ? " · blocked" : ""),

@@ -47,7 +47,8 @@ can't hide spent quota.
     row with no results and engines reported down, the run moves to Firecrawl.
   - Firecrawl (usage source "firecrawl", in credits; a 10-result search costs
     2): searches SEARCH_INTERVAL apart (free plan: 10 a minute). HTTP 402 (out
-    of credits) ends the run. Optional cap: FIRECRAWL_MONTHLY_CREDITS a
+    of credits) switches it off for the run and hands the search back to the
+    others; the run ends when no search is left. Optional cap: FIRECRAWL_MONTHLY_CREDITS a
     calendar month, --max-credits a run.
   - Gemini (usage sources "gemini" and "gemini:<model>", Pacific day): calls
     MIN_INTERVAL apart, at most DAILY_LIMIT a day per model. The free tier's
@@ -762,6 +763,7 @@ class Run:
         self.searxng_on = bool(getattr(client, "searxng_url", None))
         self.searxng_fails = 0
         self.firecrawl_on = getattr(client, "has_firecrawl", True)
+        self.firecrawl_off = "off"            # why, once it is switched off
         self.contextdev_on = getattr(client, "has_contextdev", False)
         self.contextdev_fails = 0
         self.contextdev_cap = getattr(client, "contextdev_max_credits", CONTEXTDEV_MAX_CREDITS)
@@ -845,10 +847,23 @@ class Run:
             if results is not None:
                 return results
         if not self.firecrawl_on:
-            raise Stop("no search left: SearXNG / context.dev aren't answering and there is no FIRECRAWL_API_KEY")
+            raise Stop("no search left: " + self.searches_off())
         if self.credits_left() < SEARCH_CREDITS:
             raise Stop("budget spent")
-        return self.search_firecrawl(query)
+        results = self.search_firecrawl(query)
+        if results is not None:
+            return results
+        # Firecrawl is out of credits and now off: the same query goes back to the
+        # searches still on (one failed SearXNG search doesn't end the run), or
+        # the run stops if there are none.
+        return self.search(query)
+
+    def searches_off(self) -> str:
+        """Why each search is off, for the run's `stopped`."""
+        return "; ".join([
+            "context.dev " + ("off" if getattr(self.client, "has_contextdev", False) else "not set up"),
+            "SearXNG " + ("not answering" if getattr(self.client, "searxng_url", None) else "not set up"),
+            "Firecrawl " + (self.firecrawl_off if getattr(self.client, "has_firecrawl", True) else "not set up")])
 
     def search_contextdev(self, query: str) -> list[dict] | None:
         """Results (their page text kept as fetched pages), or None when context.dev
@@ -930,7 +945,9 @@ class Run:
             self.log(f"  searxng: {SEARXNG_MAX_FAILS} failed searches in a row, switched off for this run")
         return None
 
-    def search_firecrawl(self, query: str) -> list[dict]:
+    def search_firecrawl(self, query: str) -> list[dict] | None:
+        """Results, or None when Firecrawl is out of credits (HTTP 402): it is then
+        switched off for the run, and the other searches carry on without it."""
         db.begin_write(self.conn)
         state.record_usage(self.conn, SEARCH, SEARCH_CREDITS)
         self.conn.commit()
@@ -938,8 +955,9 @@ class Run:
         self.stats["credits"] += SEARCH_CREDITS
         resp = self.call(lambda: self.client.search(query), "Firecrawl")
         if resp.status == 402:
-            self.log(f"  firecrawl: HTTP 402 {resp.text[:300]}")
-            raise Stop("Firecrawl HTTP 402 (credits spent)")
+            self.log(f"  firecrawl: HTTP 402 {resp.text[:300]}; switched off for this run")
+            self.firecrawl_on, self.firecrawl_off = False, "out of credits (HTTP 402)"
+            return None
         if resp.status != 200:
             raise requests.RequestException(f"Firecrawl HTTP {resp.status} {resp.text[:200]}")
         raw = resp.json()

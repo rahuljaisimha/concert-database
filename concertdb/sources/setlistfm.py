@@ -21,6 +21,8 @@ import sqlite3
 import time
 from datetime import datetime
 
+import requests
+
 from .. import db, ledger, state
 from ..http import Fetcher
 from ..infer import SetlistFacts, infer_bill
@@ -33,6 +35,10 @@ MAX_INTERVAL = 5.0
 # On HTTP 429: wait, slow down for the rest of the run, retry the same page.
 # After this many 429s in a row it's probably the daily limit: stop the run.
 BACKOFF_SECONDS = (10, 30, 60, 120)
+# On a timeout or dropped connection: wait, retry the same page. After this many
+# in a row setlist.fm is down (or our network is): end the run cleanly, keeping
+# what it stored; the unit resumes at the same page next time.
+NETWORK_BACKOFF_SECONDS = (15, 60, 180)
 sleep = time.sleep          # replaced in tests
 # First pass reads only an artist's newest FIRST_PASS_PAGES pages (20 setlists
 # each), so many artists get coverage quickly. The rest of their history is
@@ -47,6 +53,10 @@ NOT_FOUND_DAYS = 180
 
 
 class RateLimited(Exception):
+    pass
+
+
+class NetworkDown(Exception):
     pass
 
 
@@ -158,7 +168,8 @@ def reinfer_show(conn: sqlite3.Connection, show_id: int) -> None:
 
 def crawl(conn: sqlite3.Connection, client: Client, max_requests: int, log=print) -> dict:
     """Spend up to max_requests (and never more than DAILY_LIMIT today)."""
-    stats = {"requests": 0, "setlists": 0, "new": 0, "units": 0, "rate_limited": 0, "_streak": 0}
+    stats = {"requests": 0, "setlists": 0, "new": 0, "units": 0, "rate_limited": 0, "network_errors": 0,
+             "_streak": 0, "_net_streak": 0}
 
     def budget_left() -> bool:
         return stats["requests"] < max_requests and state.requests_today(conn, SOURCE) < DAILY_LIMIT
@@ -177,7 +188,12 @@ def crawl(conn: sqlite3.Connection, client: Client, max_requests: int, log=print
         log(f"setlist.fm: {len(BACKOFF_SECONDS) + 1} rate-limit responses in a row"
             " (probably the daily limit); stopping this run")
         conn.commit()
+    except NetworkDown as e:
+        log(f"setlist.fm: {len(NETWORK_BACKOFF_SECONDS) + 1} network errors in a row ({e}); stopping this run")
+        stats["stopped"] = f"setlist.fm not answering ({e})"
+        conn.commit()
     stats.pop("_streak", None)
+    stats.pop("_net_streak", None)
     return stats
 
 
@@ -202,7 +218,23 @@ def _crawl_unit(conn, client, row, stats, budget_left, log) -> None:
             log(f"  {key}: newest {FIRST_PASS_PAGES} pages done; older history queued for the deep pass")
             return
         conn.commit()  # never hold the write lock across a request
-        resp = client.page(kind, ident, page)
+        try:
+            resp = client.page(kind, ident, page)
+        except requests.RequestException as e:      # timeout, dropped connection
+            db.begin_write(conn)
+            stats["requests"] += 1
+            stats["network_errors"] += 1
+            state.record_usage(conn, SOURCE)        # it may have counted against the key
+            conn.commit()
+            streak = stats["_net_streak"]
+            why = type(e).__name__
+            if streak >= len(NETWORK_BACKOFF_SECONDS):
+                raise NetworkDown(why) from e
+            stats["_net_streak"] = streak + 1
+            log(f"  {key}: {why}; waiting {NETWORK_BACKOFF_SECONDS[streak]}s, then page {page} again")
+            sleep(NETWORK_BACKOFF_SECONDS[streak])
+            continue
+        stats["_net_streak"] = 0
         db.begin_write(conn)
         stats["requests"] += 1
         state.record_usage(conn, SOURCE)

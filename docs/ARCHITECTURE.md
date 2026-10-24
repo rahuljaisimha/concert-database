@@ -120,6 +120,11 @@ setlist.fm requests start at least 1 s apart. On HTTP 429 the crawler waits
 same page. Five 429s in a row is treated as the daily limit and ends the
 run; the cursor resumes from that page next time.
 
+A timeout or dropped connection (no HTTP answer) counts as a request, waits
+15 s, 60 s, then 180 s and retries the same page. A fourth in a row ends the
+run cleanly (`stopped` = "setlist.fm not answering (…)" in the run's stats,
+the step still recorded as finished); the cursor resumes from that page.
+
 ## Concurrency
 
 Three processes share the database: the daily `concertdb run` (pages,
@@ -311,7 +316,10 @@ sent.
   is against their terms; Firecrawl and Gemini are the sanctioned path.
 - Firecrawl (`usage` source `firecrawl`, in credits; a 10-result search costs
   2; the free plan has 1,000 a month): searches 6.5 s apart (free plan: 10 a
-  minute). HTTP 402 (out of credits) ends the run. Optional caps:
+  minute). HTTP 402 (out of credits) switches it off for the run: that search
+  goes back to context.dev / SearXNG if either is still on (one failed SearXNG
+  search no longer ends the run), and the run ends with `stopped` = "no search
+  left: …" only when none is. Optional caps:
   `FIRECRAWL_MONTHLY_CREDITS` a calendar month, `--max-credits` a run.
 - Gemini (`usage` sources `gemini`, all models, and `gemini:<model>`, Pacific
   day): the free tier's quota is per model; `gemini-3.5-flash-lite` and
