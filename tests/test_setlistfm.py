@@ -1,5 +1,7 @@
 import json
 
+import requests
+
 from concertdb import state
 from concertdb.sources import setlistfm
 from conftest import FLAT_WORMS, OSEES, FakeSetlistClient, add_graph_artist, fixture_text, ok, setlist_page, status
@@ -123,6 +125,41 @@ def test_repeated_rate_limit_stops_run(conn, monkeypatch):
     stats = setlistfm.crawl(conn, client, max_requests=50, log=lambda *_: None)
     assert stats["requests"] == len(setlistfm.BACKOFF_SECONDS) + 1
     assert "_streak" not in stats
+
+
+class Flaky(SequenceClient):
+    """SequenceClient where an exception in the list is raised instead of returned."""
+
+    def page(self, kind, ident, page):
+        r = super().page(kind, ident, page)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+
+def test_network_error_waits_and_retries_same_page(conn, monkeypatch):
+    waits = []
+    monkeypatch.setattr(setlistfm, "sleep", waits.append)
+    state.ensure(conn, "setlistfm", f"artist:{OSEES}")
+    client = Flaky([requests.exceptions.ReadTimeout("read timed out"), requests.exceptions.ConnectionError("reset"),
+                    setlist_page([_sl(1)])])
+    stats = setlistfm.crawl(conn, client, max_requests=10, log=lambda *_: None)
+    assert [c[2] for c in client.calls if c[0] == "artist"] == [1, 1, 1]
+    assert waits == list(setlistfm.NETWORK_BACKOFF_SECONDS[:2])
+    assert stats["network_errors"] == 2 and stats["new"] == 1 and "stopped" not in stats
+    assert state.requests_today(conn, "setlistfm") == stats["requests"]   # failed requests count too
+
+
+def test_setlistfm_down_ends_the_run_cleanly(conn, monkeypatch):
+    monkeypatch.setattr(setlistfm, "sleep", lambda s: None)
+    state.ensure(conn, "setlistfm", f"artist:{OSEES}")
+    client = Flaky([setlist_page([_sl(1)], total=60)] + [requests.exceptions.ReadTimeout("x")] * 10)
+    stats = setlistfm.crawl(conn, client, max_requests=50, log=lambda *_: None)
+    assert stats["network_errors"] == len(setlistfm.NETWORK_BACKOFF_SECONDS) + 1
+    assert stats["stopped"].startswith("setlist.fm not answering (ReadTimeout")
+    assert stats["new"] == 1 and "_net_streak" not in stats
+    cur = state.get_cursor(state.get(conn, "setlistfm", f"artist:{OSEES}"))
+    assert cur["next_page"] == 2                                      # resumes at the page that failed
 
 
 def test_daily_limit_respected(conn, monkeypatch):

@@ -336,11 +336,12 @@ def test_no_credits_no_requests(conn):
     assert client.queries == []
 
 
-def test_out_of_firecrawl_credits_ends_the_run(conn):
+def test_out_of_firecrawl_credits_with_no_other_search_ends_the_run(conn):
     ty_tour(conn)
     client = FakeClient([], searches={"tour": Response(402, "Payment required", None, None, None)})
     stats = gemini.ask(conn, client, **QUIET)
-    assert stats["stopped"].startswith("Firecrawl HTTP 402")
+    assert stats["stopped"].startswith("no search left") and "Firecrawl out of credits" in stats["stopped"]
+    assert len(client.queries) == 1                                   # off after the 402
     assert len(state.due(conn, "gemini")) == 3
 
 
@@ -724,6 +725,21 @@ def test_firecrawl_takes_over_when_searxng_stops_answering(conn):
     # Tour + venue query fail on SearXNG (and go to Firecrawl); the third failure switches it off.
     assert len(client.searx_queries) == gemini.SEARXNG_MAX_FAILS
     assert stats["specific"] == 3 and len(client.queries) == 3
+
+
+def test_out_of_firecrawl_credits_hands_the_search_back_to_searxng(conn):
+    # One empty SearXNG search (an engine down) went to Firecrawl, which is out of
+    # credits: the run carries on with SearXNG instead of ending.
+    ty_tour(conn)
+    c = ty_client()
+    client = SearxClient(c.answers, searx={
+        "tour support": [searx(down=("brave",)), searx((TOUR_URL, "Ty Segall Australian Tour", "Earth Tongue on all dates"))],
+        '"The Metro" Sydney': searx((METRO_URL, "Ty Segall - The Metro", "Monday 2 March"))},
+        searches={"Ty Segall": Response(402, "Payment required", None, None, None)}, pages=c.pages)
+    stats = gemini.ask(conn, client, **QUIET)
+    assert len(client.queries) == 1 and stats["stopped"] is None
+    assert client.searx_queries[0] == client.searx_queries[1]        # the same query, back on SearXNG
+    assert stats["specific"] == 3
 
 
 def test_no_search_left_ends_the_run(conn):
