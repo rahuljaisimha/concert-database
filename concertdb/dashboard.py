@@ -13,7 +13,7 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from . import db, export, runs, state, status
+from . import db, export, review, runs, state, status
 from .sources import gemini, pollstar
 
 STEPS = ["setlistfm", "gemini", "pollstar", "capture", "backup"]
@@ -260,9 +260,9 @@ def alerts(d: dict, r: dict) -> list[dict]:
     cd = r["contextdev"]
     if cd["days_left"] is not None and cd["days_left"] < 14:
         out.append({"level": "warning", "text": f"context.dev credits run out in about {cd['days_left']} days"})
-    review = sum(d["names_to_review"].values())
-    if review:
-        out.append({"level": "info", "text": f"{review:,} flagged act names to review"})
+    to_review = sum(d["names_to_review"].values())
+    if to_review:
+        out.append({"level": "info", "text": f"{to_review:,} flagged act names to review", "href": "#review"})
     return out
 
 
@@ -281,7 +281,8 @@ def collect(conn: sqlite3.Connection, today: date | None = None, snapshot: bool 
         base = _before(snaps, now - ago)
         d["deltas"][label] = {k: d[k] - base[k] for k in HEADLINE if k in base} if base else None
     r = run_metrics(conn)
-    return {"generated_at": now.isoformat(), "data": d, "runs": r, "alerts": alerts(d, r)}
+    return {"generated_at": now.isoformat(), "data": d, "runs": r, "alerts": alerts(d, r),
+            "review": review.flagged(conn)}
 
 
 def render(info: dict) -> str:

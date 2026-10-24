@@ -107,6 +107,7 @@ concertdb mb-load                     # MusicBrainz names/aliases for matching (
 concertdb status                      # coverage and progress
 concertdb dashboard                   # data/dashboard.html (also written after every scheduled step)
 concertdb shows "Flat Worms"          # what we know about an artist
+deploy/review.sh                      # flagged act names from `gemini`: list, then keep / rename / mbid / delete each
 concertdb export --musicbrainz-only   # data/export/opened_for.csv for MusicSceneMap
 ```
 
@@ -135,7 +136,8 @@ small Worker behind Cloudflare Access serves to your phone (docs/HOSTING.md,
   4+), concerts with 2+ acts, opened-for pairs (what `export
   --musicbrainz-only` gives MusicSceneMap), venues, cities and countries,
   concerts by year, new concerts per day, top countries, what each source
-  contributes, flagged act names to review. Headline numbers show the change
+  contributes, flagged act names to review (each with its shows, the page it
+  came from, and the `deploy/review.sh` command for each outcome). Headline numbers show the change
   over 24 hours and 7 days, and their growth over time.
 - **The runs**: the last run of each step (when, how long, finished or not,
   what it did), requests per day per source against their limits, the Gemini
@@ -144,7 +146,7 @@ small Worker behind Cloudflare Access serves to your phone (docs/HOSTING.md,
   queues, and the last 40 steps.
 - **Alerts** at the top: no backup in 26 hours, a failed or killed step,
   Pollstar paused, context.dev credits running out within two weeks, names to
-  review.
+  review (linked to the list).
 
 Each step is recorded in the `runs` table, and the headline numbers in
 `metric_snapshots` each time the page is written (see docs/ARCHITECTURE.md).

@@ -7,7 +7,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from . import backup, dashboard, db, export, ledger, musicbrainz, runs, seed, smoke, state, status
+from . import backup, dashboard, db, export, ledger, musicbrainz, review, runs, seed, smoke, state, status
 from .http import Fetcher
 from .normalize import norm
 from .sources import gemini, jsonld, pollstar, setlistfm
@@ -259,6 +259,32 @@ def cmd_dashboard(args):
     _publish_dashboard(args, _conn(args), upload=not args.no_upload)
 
 
+def cmd_review(args):
+    conn = _conn(args)
+    if args.action in (None, "list"):
+        items = review.flagged(conn)
+        print(json.dumps(items, indent=2) if args.json else review.format_list(items))
+        return
+    try:
+        if args.action == "keep":
+            done = review.keep(conn, args.name)
+        elif args.action == "rename":
+            done = review.rename(conn, args.name, new_name=args.new_name)
+        elif args.action == "mbid":
+            done = review.rename(conn, args.name, mbid=args.mbid)
+        else:
+            done = review.delete(conn, args.name)
+    except review.ReviewError as e:
+        sys.exit(f"review: {e}")
+    to = f" -> {done['to']!r} ({done['artist_id']})" if "to" in done else ""
+    print(f"{done['action']} {done['name']!r}{to} on {done['shows']} show(s)"
+          + (f", {done['shows_dropped']} left empty and removed" if done.get("shows_dropped") else ""))
+    left = len(review.flagged(conn))
+    print(f"{left} flagged name(s) left")
+    if not args.no_dashboard:
+        _write_dashboard(args, conn)
+
+
 def cmd_restore(args):
     backup.restore(Path(args.db), _data_dir(args))
     print("restored; run `concertdb mb-load` to rebuild data/musicbrainz.sqlite (not backed up)")
@@ -326,6 +352,23 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("artist", help="name or MusicBrainz ID")
     s.add_argument("--limit", type=int, default=50)
     s.set_defaults(fn=cmd_shows)
+
+    s = sub.add_parser("review", help="flagged act names from the Gemini step: list, keep, rename, mbid, delete")
+    s.set_defaults(fn=cmd_review, json=False, no_dashboard=False)
+    rs = s.add_subparsers(dest="action")
+    r = rs.add_parser("list", help="list flagged names with their shows and pages (the default)")
+    r.add_argument("--json", action="store_true")
+    for name, hlp in (("keep", "the name is right: drop the flag"),
+                      ("rename", "store the act under another name"),
+                      ("mbid", "the act is this MusicBrainz artist"),
+                      ("delete", "not an act: remove its claims")):
+        r = rs.add_parser(name, help=hlp)
+        r.add_argument("name", help="the flagged name as listed (or its artist id)")
+        if name == "rename":
+            r.add_argument("new_name")
+        if name == "mbid":
+            r.add_argument("mbid")
+        r.add_argument("--no-dashboard", action="store_true", help="don't rewrite and upload the dashboard after")
 
     s = sub.add_parser("capture-add", help="watch venue calendar / event pages (schema.org data)")
     s.add_argument("urls", nargs="+")
