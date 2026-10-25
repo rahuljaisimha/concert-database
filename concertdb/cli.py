@@ -7,7 +7,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from . import backup, dashboard, db, export, ledger, musicbrainz, review, runs, seed, smoke, state, status
+from . import backup, dashboard, db, export, ledger, misses, musicbrainz, review, runs, seed, smoke, state, status
 from .http import Fetcher
 from .normalize import norm
 from .sources import gemini, jsonld, pollstar, setlistfm
@@ -171,13 +171,37 @@ def cmd_gemini(args):
         _write_dashboard(args, conn)
 
 
+def _misses_step(conn) -> None:
+    """Prioritize the artists MusicSceneMap users looked for (concertdb/misses.py). Never fails the run."""
+    url = misses.configured()
+    if not url:
+        print(f"== MusicSceneMap search misses skipped (no {misses.ENV})")
+        return
+    print("== MusicSceneMap search misses")
+    try:
+        print(runs.record(conn, "misses", lambda: misses.prioritize_misses(
+            conn, lambda after: misses.fetch_from_postgres(url, after))))
+    except Exception as e:      # noqa: BLE001 (recorded as a failed step; the crawl carries on)
+        print(f"search misses problem (the run carries on): {type(e).__name__}: {e}")
+
+
+def cmd_misses(args):
+    url = misses.configured()
+    if not url:
+        sys.exit(f"set {misses.ENV} (a read-only login for MusicSceneMap's search_misses)")
+    conn = _conn(args)
+    print(runs.record(conn, "misses", lambda: misses.prioritize_misses(
+        conn, lambda after: misses.fetch_from_postgres(url, after), max_per_run=args.max)))
+
+
 def cmd_run(args):
-    """One scheduled cycle: watched pages, setlist.fm, Pollstar, backup. Safe to run often.
+    """One scheduled cycle: search misses, watched pages, setlist.fm, Pollstar, backup. Safe to run often.
 
     Pollstar is skipped while a separate `concertdb pollstar` process is running
     (it holds the Pollstar lock), so the two never crawl Pollstar at once.
     """
     conn = _conn(args)
+    _misses_step(conn)     # first, so the artists it prioritizes are crawled tonight
     print("== capture (schema.org pages)")
     print(runs.record(conn, "capture", lambda: jsonld.capture(conn, Fetcher(_data_dir(args), min_interval=1.0))))
     if os.environ.get("SETLISTFM_API_KEY"):
@@ -417,7 +441,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--all", action="store_true", help="every case, not just the default two (costs more)")
     s.set_defaults(fn=cmd_gemini_eval)
 
-    s = sub.add_parser("run", help="one scheduled cycle: watched pages, setlist.fm, Pollstar, backup")
+    s = sub.add_parser("misses", help="prioritize the artists MusicSceneMap users looked for and didn't find"
+                       f" (also the first step of `run`; needs ${misses.ENV})")
+    s.add_argument("--max", type=int, default=misses.MAX_PER_RUN, help="new artists this run")
+    s.set_defaults(fn=cmd_misses, locked="crawl")
+
+    s = sub.add_parser("run", help="one scheduled cycle: search misses, watched pages, setlist.fm, Pollstar,"
+                       " backup")
     s.add_argument("--setlistfm-requests", type=int, default=setlistfm.DAILY_LIMIT)
     s.add_argument("--pollstar-requests", type=int, default=RUN_POLLSTAR_REQUESTS,
                    help="Pollstar budget inside `run` (0 = none); the separate `pollstar`"
