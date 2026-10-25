@@ -43,6 +43,10 @@ set -a; . ./.env; set +a
 
 # Crawl the artists you care about first
 .venv/bin/concertdb prioritize "Osees" "Flat Worms" "Ty Segall"
+
+# ...and the ones MusicSceneMap users looked for and didn't find (also the first
+# step of every `run`; needs MSM_MISSES_DB_URL and: .venv/bin/pip install -e '.[misses]')
+.venv/bin/concertdb misses
 ```
 
 ## MusicBrainz data

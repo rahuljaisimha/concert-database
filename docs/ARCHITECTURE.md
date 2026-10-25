@@ -87,7 +87,8 @@ Otherwise roles stay unknown (the show still counts as "played together").
   lowest priority, so every artist gets recent coverage before any artist's
   old shows are fetched; the deep pass then continues from the saved page
   until the history is complete. Artists you `prioritize` skip the cap and
-  get their full history at once.
+  get their full history at once, and so do the artists MusicSceneMap users
+  looked for and didn't find (see "Search misses from MusicSceneMap").
 - Later visits read newest-first and stop at the first page with nothing new.
 - Recheck intervals double when nothing changed (setlist.fm 14 → 180 days,
   pages 1 → 7 days, or 365 once every event on a page is past) and reset when
@@ -168,6 +169,31 @@ headline numbers in `metric_snapshots` for trends and 24 h / 7 day deltas.
 `dashboard.write()` renders `concertdb/dashboard_template.html` with that data
 embedded as JSON; the page draws its own charts (inline SVG, no libraries).
 A dashboard error is printed but never fails a run.
+
+## Search misses from MusicSceneMap (`concertdb/misses.py`)
+
+MusicSceneMap's graph is built from the artists with concerts here, so an
+artist its users look for and can't find gets in by being crawled. MusicSceneMap
+logs each such search in its Supabase table `search_misses` (`id, query,
+source, created_at`): the MusicBrainz ID when the user picked the artist from
+its dropdown's MusicBrainz results, else the typed name.
+
+The first step of every `run` (or `concertdb misses`) reads the misses logged
+since the last run with `MSM_MISSES_DB_URL`, a Postgres login that can only
+read that table (MusicSceneMap's migration 007), and:
+
+- resolves each query to a MusicBrainz ID: an MBID as is (if MusicBrainz knows
+  it); a name through every artist's names and aliases in
+  `data/musicbrainz.sqlite` ("Thee Oh Sees" → Osees). One artist with that name
+  → it; several → skipped as ambiguous; none → skipped.
+- adds the artist to the ledger if needed and queues it for setlist.fm at the
+  same priority as `concertdb prioritize` (full history, first in line).
+- stops at 25 new artists a run (`MAX_PER_RUN`), so the rest of the queue keeps
+  most of the day's 1,400 requests; later misses wait for the next run. Its
+  position in the table is `meta.misses_last_id`.
+
+Nothing is written back to MusicSceneMap. A failure (Supabase unreachable) is
+recorded as a failed `misses` step and the run carries on.
 
 ## Moving to Postgres later
 

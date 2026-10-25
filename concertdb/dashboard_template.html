@@ -397,6 +397,8 @@ const DATA = /*DATA*/null;
   const SUM = {
     setlistfm: s => `${fmt(s.requests)} requests · ${fmt(s.setlists)} setlists · ${fmt(s.new)} new` + (s.rate_limited ? ` · ${s.rate_limited} rate-limited` : "")
       + (s.network_errors ? ` · ${s.network_errors} network errors` : "") + (s.stopped ? ` · stopped: ${s.stopped}` : ""),
+    misses: s => `${fmt(s.misses)} search misses · ${fmt(s.prioritized)} artists prioritized` + (s.ambiguous ? ` · ${fmt(s.ambiguous)} ambiguous` : "")
+      + (s.not_found ? ` · ${fmt(s.not_found)} not found` : "") + (s.deferred ? ` · ${fmt(s.deferred)} left for next run` : ""),
     gemini: s => `${fmt(s.shows)} shows checked · ${fmt(s.gemini_calls)} Gemini calls · ${fmt(s.searches)} searches · ${fmt(s.discovered)} new shows` + (s.stopped ? ` · stopped: ${s.stopped}` : ""),
     pollstar: s => s.paused_until && !s.requests ? `paused until ${when(s.paused_until)}` :
       `${fmt(s.requests)} requests · ${fmt(s.events)} events · ${fmt(s.pushback)} pushbacks` + (s.blocked ? " · blocked" : ""),
