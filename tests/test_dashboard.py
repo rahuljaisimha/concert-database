@@ -235,3 +235,29 @@ def test_coverage_parts_and_overall(ledger_with_shows):
 
 def test_coverage_without_any_totals_has_no_overall(conn):
     assert dashboard.coverage(conn, "2026-10-20")["overall"] is None
+
+
+def test_coverage_for_the_last_5_years(ledger_with_shows):
+    conn = ledger_with_shows
+    from concertdb import state
+    from concertdb.sources import setlistfm
+    for mbid in ("mb-idc", "mb-fw", "mb-x", "mb-y"):
+        state.ensure(conn, setlistfm.SOURCE, f"artist:{mbid}")
+    checked = "UPDATE crawl_state SET last_checked = '2026-10-20T00:00:00+00:00', cursor = ? WHERE key = ?"
+    conn.execute(checked, ('{"backfill_done": true}', "artist:mb-fw"))      # full history
+    conn.execute(checked, (None, "artist:mb-idc"))                            # oldest show held 2024-09-17
+    conn.execute(checked, ('{"next_page": 3, "reached": "2025-06-01"}', "artist:mb-x"))   # not back far enough
+    conn.commit()
+    cov = dashboard.coverage(conn, "2026-10-20", since="2024-10-01")
+    p = {x["key"]: x for x in cov["parts"]}
+    assert cov["since"] == "2024-10-01" and "artists_full" not in p
+    assert (p["artists_checked"]["num"], p["artists_checked"]["den"]) == (3, 4)
+    assert p["history_held"]["label"] == "Their last 5 years fetched"
+    assert (p["history_held"]["num"], p["history_held"]["den"]) == (2, 3)     # mb-fw, mb-idc; not mb-x
+    assert (p["bills_settled"]["num"], p["bills_settled"]["den"]) == (0, 1)   # only Echo (2025-01-02) is in range
+    assert cov["overall"] == 0.0
+    assert dashboard.years_ago("2028-02-29", 5) == "2023-02-28"
+    info = dashboard.collect(conn, today=date(2026, 10, 20), snapshot=True)
+    assert info["data"]["coverage_recent"]["since"] == "2021-10-20"
+    assert info["data"]["coverage_trend"][-1]["recent"]["history_held"] == [1, 3]   # 2021 cutoff: only mb-fw
+    assert "Last 5 years" in dashboard.render(info)

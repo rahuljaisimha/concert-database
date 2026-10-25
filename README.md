@@ -135,12 +135,15 @@ it is also uploaded to the backup bucket as `dashboards/index.html`, which a
 small Worker behind Cloudflare Access serves to your phone (docs/HOSTING.md,
 "Dashboard on your phone").
 
-- **How complete is it?**: an overall estimate (artists checked on setlist.fm
+- **How complete is it?** (all time, or a toggle for the last 5 years): an overall estimate (artists checked on setlist.fm
   × their setlists held × bills settled) and each part as a percentage with a
   bar; hover or tap one for its numerator and denominator. Also artists with
   their full history and shows Gemini has checked. "Expected shows" is
   setlist.fm's own count per artist (`setlistfm_totals`, recorded on every
-  crawl), so it's only known for artists crawled at least once. Below them,
+  crawl), so it's only known for artists crawled at least once. The last-5-years
+  view counts only shows since then; setlist.fm has no count per period, so its
+  history figure is the share of checked artists whose pages we've read back
+  that far (pages come newest first; cursor `reached`). Below them,
   each figure over the last 7 or 30 days: every dashboard write stores each
   part's numerator and denominator in `metric_snapshots`, so the trend (and
   the counts behind any point, on hover) builds up from the first run.
