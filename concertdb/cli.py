@@ -66,9 +66,10 @@ def cmd_add_show(args):
 
 def _print_show(conn, show_id):
     s = conn.execute(
-        "SELECT s.date, s.status, v.name AS venue, v.city FROM shows s JOIN venues v ON v.id = s.venue_id"
+        "SELECT s.date, s.status, s.sources, v.name AS venue, v.city FROM shows s JOIN venues v ON v.id = s.venue_id"
         " WHERE s.id = ?", (show_id,)).fetchone()
-    print(f"{s['date']}  {s['venue']}, {s['city'] or '?'}  [{s['status']}]")
+    print(f"{s['date']}  {s['venue']}, {s['city'] or '?'}  [{s['status']}]"
+          f"  sources: {', '.join(json.loads(s['sources'])) or '-'}")
     for b in conn.execute(
         "SELECT a.name, a.mbid, a.disambiguation, b.role, b.confidence, b.n_sources FROM billings b"
         " JOIN artists a ON a.id = b.artist_id WHERE b.show_id = ?"

@@ -129,9 +129,9 @@ HANDLE_SUFFIXES = ("band", "music", "official")   # @flatwormsband -> Flat Worms
 MAX_OPENERS = 6             # more support acts than this is a festival lineup, not one bill
 TRANSIENT = (500, 502, 503, 504)   # "overloaded": waited out like a per-minute 429
 TRANSIENT_WAIT = 30
-NOT_FOUND_MIN_DAYS = 90
+NOT_FOUND_MIN_DAYS = 90     # tour-wide evidence only: asked again after 90, 180, then 365 days
 NOT_FOUND_MAX_DAYS = 365
-DONE_DAYS = 10 * 365
+DONE_DAYS = 10 * 365        # not asked again: a confirmed bill, a festival, or nothing found
 CONF_SPECIFIC = 0.8
 CONF_PAGE = 0.5
 PRIORITIZED = 10**6         # added to the queue priority of shows by artists you prioritized
@@ -1129,14 +1129,23 @@ class Run:
         out["url"] = src["url"] if specific else None
         return out
 
+    def outcome(self, key: str, outcome: str) -> None:
+        """What came of looking at the show, kept in its queue entry's cursor (like setlist.fm's
+        paging position): specific | page_only | festival | not_found, the model and prompt version."""
+        state.save_cursor(self.conn, SOURCE, key, {"outcome": outcome, "model": self.model,
+                                                   "prompt_version": PROMPT_VERSION})
+
     def store(self, show: dict, r: dict, texts: list[dict] | None = None) -> None:
         key = f"show:{show['id']}"
         self.stats["shows"] += 1
         if r["dropped"]:
             self.log(f"    {show['date']}: not on any fetched page, dropped: {', '.join(r['dropped'])}")
         if not r["acts"]:
-            state.mark_checked(self.conn, SOURCE, key, changed=False,
-                               min_days=NOT_FOUND_MIN_DAYS, max_days=NOT_FOUND_MAX_DAYS)
+            # Nothing online about this bill: the show stays as it was (no claims), and isn't
+            # asked again. Many shows simply have nothing to find. Still listed in its sources.
+            ledger.note_source(self.conn, show["id"], SOURCE)
+            state.postpone(self.conn, SOURCE, key, DONE_DAYS)
+            self.outcome(key, "not_found")
             self.stats["not_found"] += 1
             self.log(f"    {show['date']} {show['venue']}: nothing found")
             return
@@ -1153,13 +1162,16 @@ class Run:
         ledger.resolve_show(self.conn, show["id"])     # a festival flag on a claim marks the show
         if r["festival"]:   # a lineup: kept as a data point, not an opened-for; not asked again
             state.postpone(self.conn, SOURCE, key, DONE_DAYS)
+            self.outcome(key, "festival")
             self.stats["festival"] += 1
         elif r["specific"]:
             state.postpone(self.conn, SOURCE, key, DONE_DAYS)
+            self.outcome(key, "specific")
             self.stats["specific"] += 1
         else:   # tour-wide evidence only: kept, and asked again later
             state.mark_checked(self.conn, SOURCE, key, changed=False,
                                min_days=NOT_FOUND_MIN_DAYS, max_days=NOT_FOUND_MAX_DAYS)
+            self.outcome(key, "page_only")
             self.stats["page_only"] += 1
         self.log(f"    {show['date']} {show['venue']}: "
                  + ", ".join(f"{n} ({role}, {check})" for n, role, _, check, _ in r["acts"]))
@@ -1257,10 +1269,14 @@ def ask(conn: sqlite3.Connection, client: Client, max_requests: int | None = Non
             continue
         show = _show(conn, show_id)
         if not _qualifies(show, max_acts):
-            # Another source filled it in (or max_acts was lowered). Forgotten rather than
-            # postponed, so queue_shows brings it back if it qualifies again.
+            # Another source filled it in (or max_acts was lowered). Never looked at: forgotten,
+            # so queue_shows brings it back if it qualifies again. Looked at: kept (with its
+            # outcome), so the record of what Gemini found stays.
             db.begin_write(conn)
-            state.forget(conn, SOURCE, row["key"])
+            if row["last_checked"] is None:
+                state.forget(conn, SOURCE, row["key"])
+            else:
+                state.postpone(conn, SOURCE, row["key"], DONE_DAYS)
             conn.commit()
             stats["skipped"] += 1
             continue

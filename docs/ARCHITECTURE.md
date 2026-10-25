@@ -6,7 +6,11 @@
 artists   id = MusicBrainz ID, or 'name:<normalized>' when not matched to MusicBrainz;
           + MusicBrainz's disambiguation note
 venues    + venue_source_ids (each source's own venue id → our venue)
-shows     one per venue per night (see "Which records are the same show")
+shows     one per venue per night (see "Which records are the same show");
+          + sources: every source that has looked at the show, in order (JSON
+          array). Cumulative: a claim adds its source, a source that found
+          nothing adds itself (Gemini), a record moving shows brings its
+          show's sources along, and nothing is ever taken off
 claims    what ONE source says about ONE artist at ONE show:
           role (headliner/opener/unknown), position, confidence, url, extra JSON
 billings  the resolved bill, recomputed from all claims for a show
@@ -306,8 +310,16 @@ Work goes a tour at a time:
 | act on no fetched page | not stored | | |
 
 Each claim's `extra` records the model, the prompt version, the check and, for
-`specific`, the quote. A show with only `page` evidence (or none) is asked again
-after 90, 180, then 365 days; a done show isn't asked again.
+`specific`, the quote. What came of looking at a show is kept in its `gemini`
+queue entry (`crawl_state`, like any source's unit of work): `last_checked`,
+and in its cursor the outcome (`specific`, `page_only`, `festival` or
+`not_found`), model and prompt version. Found nothing leaves the show itself as
+it was (no claims). A show with only `page` evidence is asked again after 90,
+180, then 365 days; any other outcome, including `not_found`, isn't asked again
+(many shows have nothing online, so asking again repeats the same empty
+searches). An entry Gemini has checked is kept even when another source fills
+the show in; only unchecked entries are dropped then. To re-ask shows on
+purpose (a better prompt, say), set their `next_due` to now.
 
 In a trial on Ty Segall's Australian shows (Feb–Mar 2026, 5 shows) the tour
 and venue searches (4 credits), 18 page fetches and one Gemini call (~9,000

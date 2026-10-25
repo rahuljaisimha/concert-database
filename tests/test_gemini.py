@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import requests
 
-from concertdb import ledger, seed, state
+from concertdb import db, ledger, seed, state
 from concertdb.http import Response
 from concertdb.sources import gemini
 from conftest import add_graph_artist, fixture_text, ok, status
@@ -198,6 +198,46 @@ def test_tour_wide_only_is_kept_weaker_and_asked_again(conn):
                      " WHERE c.source = 'gemini' AND c.show_id = 3 AND a.name = 'Earth Tongue'").fetchone()
     assert c["confidence"] == gemini.CONF_PAGE and json.loads(c["extra"])["check"] == "page"
     assert state.get(conn, "gemini", "show:3")["interval_days"] == gemini.NOT_FOUND_MIN_DAYS
+    assert outcomes(conn) == {"show:1": "specific", "show:2": "specific", "show:3": "page_only"}
+
+
+def outcomes(conn):
+    return {r["key"]: state.get_cursor(r).get("outcome")
+            for r in conn.execute("SELECT * FROM crawl_state WHERE source = 'gemini'")}
+
+
+def test_nothing_found_is_recorded_and_never_asked_again(conn):
+    ty_tour(conn)
+    client = ty_client()
+    client.answers = [answer({"shows": [], "other_shows": []})] * 4
+    stats = gemini.ask(conn, client, **QUIET)
+    assert stats["not_found"] == 3
+    assert outcomes(conn) == {"show:1": "not_found", "show:2": "not_found", "show:3": "not_found"}
+    assert conn.execute("SELECT COUNT(*) FROM claims WHERE source = 'gemini'").fetchone()[0] == 0   # still unknown
+    assert all(json.loads(r[0])[-1] == "gemini" for r in conn.execute("SELECT sources FROM shows"))
+    row = state.get(conn, "gemini", "show:1")
+    assert row["interval_days"] == gemini.DONE_DAYS and row["last_checked"]
+    cur = state.get_cursor(row)
+    assert cur["prompt_version"] == gemini.PROMPT_VERSION and cur["model"]
+    gemini.queue_shows(conn)                       # re-queuing leaves the checked entries as they are
+    assert state.due(conn, "gemini") == [] and outcomes(conn)["show:1"] == "not_found"
+
+
+def test_a_checked_show_keeps_its_record_when_another_source_fills_it_in(conn):
+    show = ty_show(conn, "2026-03-02", "The Metro", "Sydney")
+    gemini.queue_shows(conn)
+    db.begin_write(conn)
+    state.save_cursor(conn, "gemini", f"show:{show}", {"outcome": "page_only"})
+    conn.execute("UPDATE crawl_state SET last_checked = '2026-09-01T00:00:00+00:00', next_due = '2000-01-01'"
+                 " WHERE key = ?", (f"show:{show}",))
+    ledger.add_claim(conn, show, ledger.get_or_create_artist(conn, "Earth Tongue"), "manual", "m1",
+                     role="opener", confidence=1.0)
+    conn.commit()
+    stats = gemini.ask(conn, FakeClient([]), **QUIET)
+    assert stats["skipped"] == 1
+    row = state.get(conn, "gemini", f"show:{show}")
+    assert row is not None and state.get_cursor(row)["outcome"] == "page_only"
+    assert row["interval_days"] == gemini.DONE_DAYS
 
 
 def test_acts_on_no_fetched_page_are_dropped(conn):

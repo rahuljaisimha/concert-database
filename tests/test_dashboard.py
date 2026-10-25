@@ -210,6 +210,7 @@ def test_coverage_parts_and_overall(ledger_with_shows):
     setlistfm.record_total(conn, "artist:mb-idc", 1)     # holds 2: capped at its total
     state.ensure(conn, "gemini", "show:1"); state.ensure(conn, "gemini", "show:2")
     conn.execute("UPDATE crawl_state SET last_checked = '2026-10-20T00:00:00+00:00' WHERE key = 'show:1'")
+    state.save_cursor(conn, "gemini", "show:1", {"outcome": "not_found"})     # nothing found: still checked
     conn.commit()
     cov = dashboard.coverage(conn, "2026-10-20")
     p = {x["key"]: x for x in cov["parts"]}
@@ -218,6 +219,7 @@ def test_coverage_parts_and_overall(ledger_with_shows):
     assert (p["history_held"]["num"], p["history_held"]["den"]) == (5, 9)
     assert (p["bills_settled"]["num"], p["bills_settled"]["den"]) == (2, 3)    # past: 2 two-act shows of 3
     assert (p["gemini_checked"]["num"], p["gemini_checked"]["den"]) == (1, 2)
+    assert p["gemini_checked"]["breakdown"] == [[1, "nothing found"]]
     assert cov["overall"] == round(100 * 2 / 3 * 5 / 9 * 2 / 3, 2)
     info = dashboard.collect(conn, today=date(2026, 10, 20), snapshot=True)
     assert info["data"]["coverage_pct"] == cov["overall"]

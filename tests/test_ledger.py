@@ -108,3 +108,60 @@ def test_many_acts_marks_festival(conn):
         a = ledger.get_or_create_artist(conn, f"Band {i}")
         ledger.add_claim(conn, s, a, "jsonld", "fest", role="opener" if i else "headliner", confidence=0.8)
     assert conn.execute("SELECT is_festival FROM shows WHERE id = ?", (s,)).fetchone()[0] == 1
+
+
+def sources(conn, show):
+    import json
+    return json.loads(conn.execute("SELECT sources FROM shows WHERE id = ?", (show,)).fetchone()["sources"])
+
+
+def test_show_sources_are_cumulative(conn):
+    v = ledger.get_or_create_venue(conn, "Zebulon", "Los Angeles")
+    s = ledger.find_or_create_show(conn, "2024-09-17", v)
+    assert sources(conn, s) == []
+    a, b = ledger.get_or_create_artist(conn, "Iguana Death Cult"), ledger.get_or_create_artist(conn, "Flat Worms")
+    ledger.add_claim(conn, s, a, "setlistfm", "sl1", role="headliner", confidence=0.9)
+    ledger.add_claim(conn, s, b, "pollstar", "ev1", role="opener", confidence=0.9)
+    ledger.add_claim(conn, s, a, "setlistfm", "sl1", role="headliner", confidence=0.95)   # again: listed once
+    ledger.note_source(conn, s, "gemini")                                                # looked, found nothing
+    assert sources(conn, s) == ["setlistfm", "pollstar", "gemini"]
+    conn.execute("DELETE FROM claims WHERE source = 'pollstar'")                         # never taken off
+    ledger.note_source(conn, s, "pollstar")
+    assert sources(conn, s) == ["setlistfm", "pollstar", "gemini"]
+
+
+def test_a_moved_record_brings_its_shows_sources(conn):
+    v = ledger.get_or_create_venue(conn, "Echo", "Los Angeles")
+    old = ledger.find_or_create_show(conn, "2024-05-01", v)
+    a = ledger.get_or_create_artist(conn, "Flat Worms")
+    ledger.add_claim(conn, old, a, "pollstar", "ev9", role="headliner", confidence=0.9)
+    ledger.note_source(conn, old, "gemini")
+    new = ledger.find_or_create_show(conn, "2024-06-12", v)               # the event was rescheduled
+    ledger.add_claim(conn, new, a, "pollstar", "ev9", role="headliner", confidence=0.9)
+    assert conn.execute("SELECT 1 FROM shows WHERE id = ?", (old,)).fetchone() is None
+    assert sources(conn, new) == ["pollstar", "gemini"]
+
+
+def test_an_older_ledger_gets_sources_from_its_claims_and_geminis_checks(tmp_path):
+    import json
+    from concertdb import db, state
+    path = tmp_path / "old.sqlite"
+    c = db.connect(path)
+    v = ledger.get_or_create_venue(c, "Zebulon", "Los Angeles")
+    s1 = ledger.find_or_create_show(c, "2024-09-17", v)
+    s2 = ledger.find_or_create_show(c, "2024-09-18", v)
+    a = ledger.get_or_create_artist(c, "Iguana Death Cult")
+    ledger.add_claim(c, s1, a, "setlistfm", "sl1", role="headliner", confidence=0.9)
+    ledger.add_claim(c, s2, a, "setlistfm", "sl2", role="headliner", confidence=0.9)
+    state.ensure(c, "gemini", f"show:{s2}")
+    c.execute("UPDATE crawl_state SET last_checked = '2026-10-01T00:00:00+00:00' WHERE key = ?", (f"show:{s2}",))
+    c.commit()
+    # as a ledger made before it: shows rebuilt without the column (SQLite's DROP COLUMN
+    # can't edit a CREATE TABLE whose last column follows a comment)
+    cols = [r["name"] for r in c.execute("PRAGMA table_info(shows)") if r["name"] != "sources"]
+    c.executescript(f"PRAGMA foreign_keys = OFF; CREATE TABLE old_shows AS SELECT {', '.join(cols)} FROM shows;"
+                    " DROP TABLE shows; ALTER TABLE old_shows RENAME TO shows;")
+    c.close()
+    c = db.connect(path)
+    got = {r["id"]: json.loads(r["sources"]) for r in c.execute("SELECT id, sources FROM shows")}
+    assert got == {s1: ["setlistfm"], s2: ["setlistfm", "gemini"]}
