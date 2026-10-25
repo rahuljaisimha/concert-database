@@ -7,6 +7,11 @@ from concertdb.sources import setlistfm
 from conftest import FLAT_WORMS, OSEES, FakeSetlistClient, add_graph_artist, fixture_text, ok, setlist_page, status
 
 
+def plain(row):
+    """A cursor without `reached` (the oldest date fetched, tested on its own)."""
+    return {k: v for k, v in state.get_cursor(row).items() if k != "reached"}
+
+
 def _sl(i, date="01-01-2024", mbid=OSEES, updated="2024-01-02T00:00:00.000+0000"):
     return {"id": f"sl{i}", "eventDate": date, "lastUpdated": updated,
             "artist": {"mbid": mbid, "name": "Osees"},
@@ -48,7 +53,7 @@ def test_backfill_then_incremental(conn):
     assert stats["new"] == 3
     assert [c[2] for c in client.calls if c[0] == "artist"] == [1, 2]
     row = state.get(conn, "setlistfm", f"artist:{OSEES}")
-    assert state.get_cursor(row) == {"backfill_done": True}
+    assert plain(row) == {"backfill_done": True}
     assert row["next_due"] > row["last_checked"]
 
     # Next visit: page 1 has nothing new → one request, stop.
@@ -67,7 +72,7 @@ def test_budget_exhausted_resumes_from_cursor(conn):
     client = FakeSetlistClient({("artist", OSEES): pages})
     setlistfm.crawl(conn, client, max_requests=1, log=lambda *_: None)
     row = state.get(conn, "setlistfm", f"artist:{OSEES}")
-    assert state.get_cursor(row) == {"next_page": 2}
+    assert plain(row) == {"next_page": 2}
     assert row["last_checked"] is None  # still due
 
     conn.execute("DELETE FROM crawl_state WHERE key LIKE 'venue:%'")
@@ -197,7 +202,7 @@ def test_first_pass_is_capped_then_deep_pass_finishes(conn, monkeypatch):
     # Osees: newest 2 pages, then "other" gets its turn, then Osees' older pages.
     assert artist_calls == [(OSEES, 1), (OSEES, 2), ("other", 1), (OSEES, 3), (OSEES, 4), (OSEES, 5)]
     row = state.get(conn, "setlistfm", f"artist:{OSEES}")
-    assert state.get_cursor(row) == {"backfill_done": True}
+    assert plain(row) == {"backfill_done": True}
     assert conn.execute("SELECT COUNT(*) FROM claims WHERE artist_id = ?", (OSEES,)).fetchone()[0] == 5
 
 
@@ -208,7 +213,7 @@ def test_deep_pass_waits_for_first_passes(conn, monkeypatch):
     setlistfm.crawl(conn, client, max_requests=1, log=lambda *_: None)
     setlistfm.crawl(conn, client, max_requests=1, log=lambda *_: None)   # only defers, no request
     row = state.get(conn, "setlistfm", f"artist:{OSEES}")
-    assert state.get_cursor(row) == {"deep": True, "next_page": 2}
+    assert plain(row) == {"deep": True, "next_page": 2}
     assert row["priority"] == setlistfm.DEEP_PRIORITY and row["last_checked"] is not None
     assert len([c for c in client.calls if c[0] == "artist"]) == 1
 
@@ -220,7 +225,7 @@ def test_in_progress_cursor_beyond_cap_is_deferred(conn):
     client = FakeSetlistClient({})
     stats = setlistfm.crawl(conn, client, max_requests=1, log=lambda *_: None)
     assert stats["deferred"] == 1
-    assert state.get_cursor(state.get(conn, "setlistfm", f"artist:{OSEES}")) == {"deep": True, "next_page": 48}
+    assert plain(state.get(conn, "setlistfm", f"artist:{OSEES}")) == {"deep": True, "next_page": 48}
 
 
 def test_prioritized_artists_are_not_capped(conn, monkeypatch):
@@ -239,14 +244,14 @@ def test_interrupted_recheck_resumes_at_its_page(conn):
     pages = [setlist_page([_sl(i)], total=3, page=i, per_page=1) for i in (1, 2, 3)]
     client = FakeSetlistClient({("artist", OSEES): pages})
     setlistfm.crawl(conn, client, max_requests=1, log=lambda *_: None)
-    assert state.get_cursor(state.get(conn, "setlistfm", key)) == {"backfill_done": True, "recheck_page": 2}
+    assert plain(state.get(conn, "setlistfm", key)) == {"backfill_done": True, "recheck_page": 2}
 
     client.calls.clear()
     conn.execute("DELETE FROM crawl_state WHERE key LIKE 'venue:%'")
     setlistfm.crawl(conn, client, max_requests=10, log=lambda *_: None)
     assert [c[2] for c in client.calls if c[0] == "artist"] == [2, 3]
     row = state.get(conn, "setlistfm", key)
-    assert state.get_cursor(row) == {"backfill_done": True}
+    assert plain(row) == {"backfill_done": True}
     assert row["interval_days"] == setlistfm.RECHECK_MIN_DAYS   # counted as changed
 
 
@@ -290,3 +295,15 @@ def test_setlistfm_totals_are_recorded(conn):
     totals = dict(conn.execute("SELECT key, total FROM setlistfm_totals").fetchall())
     assert totals[f"artist:{OSEES}"] == 3
     assert totals["artist:unknown-mbid"] == 0          # not on setlist.fm: nothing missing
+
+
+def test_the_oldest_date_reached_is_kept_in_the_cursor(conn):
+    state.ensure(conn, "setlistfm", f"artist:{OSEES}", priority=5)
+    page1 = setlist_page([_sl(1, "05-06-2024"), _sl(2, "01-03-2023")], total=3, per_page=2)
+    page2 = setlist_page([_sl(3, "17-09-2019")], total=3, page=2, per_page=2)
+    client = FakeSetlistClient({("artist", OSEES): [page1, page2]})
+    setlistfm.crawl(conn, client, max_requests=1, log=lambda *_: None)          # first page only
+    assert state.get_cursor(state.get(conn, "setlistfm", f"artist:{OSEES}"))["reached"] == "2023-03-01"
+    setlistfm.crawl(conn, client, max_requests=5, log=lambda *_: None)
+    cur = state.get_cursor(state.get(conn, "setlistfm", f"artist:{OSEES}"))
+    assert cur == {"backfill_done": True, "reached": "2019-09-17"}

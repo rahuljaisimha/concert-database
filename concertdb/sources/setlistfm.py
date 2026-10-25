@@ -216,11 +216,15 @@ def _crawl_unit(conn, client, row, stats, budget_left, log) -> None:
     # page 1 would find nothing new there and stop before reaching the rest.
     page = cursor.get("next_page", 1) if backfill else cursor.get("recheck_page", 1)
     any_new = not backfill and page > 1   # resumed: an earlier page had new setlists
+    # The oldest show date reached on this unit's own pages (newest first, so everything since
+    # then is fetched): the dashboard's "last 5 years fetched". Carried in every cursor saved.
+    reached = cursor.get("reached")
+    keep = lambda c: {**c, **({"reached": reached} if reached else {})}   # noqa: E731
     stats["units"] += 1
 
     while budget_left():
         if capped and page > FIRST_PASS_PAGES:
-            state.defer_deep_pass(conn, SOURCE, key, {"deep": True, "next_page": page}, DEEP_PRIORITY)
+            state.defer_deep_pass(conn, SOURCE, key, keep({"deep": True, "next_page": page}), DEEP_PRIORITY)
             stats["deferred"] = stats.get("deferred", 0) + 1
             log(f"  {key}: newest {FIRST_PASS_PAGES} pages done; older history queued for the deep pass")
             return
@@ -278,6 +282,8 @@ def _crawl_unit(conn, client, row, stats, budget_left, log) -> None:
                 p = parse_setlist(sl)
             except (KeyError, ValueError):
                 continue
+            if backfill and (reached is None or p["date"] < reached):
+                reached = p["date"]
             if is_known(conn, p):
                 continue
             ingest_setlist(conn, p)
@@ -292,18 +298,18 @@ def _crawl_unit(conn, client, row, stats, budget_left, log) -> None:
 
         if backfill:
             if last_page:
-                state.save_cursor(conn, SOURCE, key, {"backfill_done": True})
+                state.save_cursor(conn, SOURCE, key, keep({"backfill_done": True}))
                 break
             page += 1
-            state.save_cursor(conn, SOURCE, key, {"next_page": page, **({"deep": True} if deep else {})})
+            state.save_cursor(conn, SOURCE, key, keep({"next_page": page, **({"deep": True} if deep else {})}))
             conn.commit()
         else:
             # Newest first: a page with nothing new means we've caught up.
             if last_page or new_on_page == 0:
-                state.save_cursor(conn, SOURCE, key, {"backfill_done": True})
+                state.save_cursor(conn, SOURCE, key, keep({"backfill_done": True}))
                 break
             page += 1
-            state.save_cursor(conn, SOURCE, key, {"backfill_done": True, "recheck_page": page})
+            state.save_cursor(conn, SOURCE, key, keep({"backfill_done": True, "recheck_page": page}))
     else:
         # Budget ran out mid-unit; it stays due and resumes from the cursor.
         return

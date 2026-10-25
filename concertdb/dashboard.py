@@ -31,7 +31,7 @@ PRIORITY_SHOWN = 15                 # prioritized artists listed (the next ones 
 PRIORITY_DONE_SHOWN = 5             # and the ones it finished most recently
 # The headline numbers kept in metric_snapshots, for the trend charts and deltas.
 HEADLINE = ["concerts", "artists_with_concerts", "concerts_2plus", "opened_for_pairs",
-            "venues_with_concerts", "upcoming", "coverage_pct"]
+            "venues_with_concerts", "upcoming", "coverage_pct", "coverage_recent_pct"]
 
 
 def _now() -> datetime:
@@ -115,6 +115,8 @@ def data_metrics(conn: sqlite3.Connection, today: date | None = None) -> dict:
         " GROUP BY k").fetchall())
     m["coverage"] = coverage(conn, today)
     m["coverage_pct"] = m["coverage"]["overall"]
+    m["coverage_recent"] = coverage(conn, today, since=years_ago(today, RECENT_YEARS))
+    m["coverage_recent_pct"] = m["coverage_recent"]["overall"]
     return m
 
 
@@ -197,8 +199,27 @@ def gemini_models(conn: sqlite3.Connection, used: dict, days: list[str], recent:
             "limit": gemini.DAILY_LIMIT}
 
 
-def coverage(conn: sqlite3.Connection, today: str) -> dict:
+RECENT_YEARS = 5                    # the dashboard's "last 5 years" completeness view
+
+
+def years_ago(today: str, years: int) -> str:
+    d = date.fromisoformat(today)
+    try:
+        return d.replace(year=d.year - years).isoformat()
+    except ValueError:                  # 29 February
+        return d.replace(year=d.year - years, day=28).isoformat()
+
+
+def coverage(conn: sqlite3.Connection, today: str, since: str | None = None) -> dict:
     """How complete the concert data is, as parts with a numerator and denominator each.
+
+    With `since` (an ISO date), only shows from then on count: bills settled and Gemini's
+    checks are counted over those shows, and instead of setlists held against setlist.fm's
+    all-time total (setlist.fm has no per-period count), "last 5 years fetched" counts the
+    checked artists whose pages we've read back past `since`: their full history, nothing on
+    setlist.fm, or (pages come newest first) the oldest date reached on their own pages
+    (cursor `reached`; for artists crawled before that was recorded, the oldest setlist.fm
+    show we hold for them, which only their own pages have provided so far).
 
     100% would be: every artist we crawl has every show setlist.fm knows of in the
     ledger, and every past show has its whole bill. "Our artists" are the artist
@@ -217,36 +238,58 @@ def coverage(conn: sqlite3.Connection, today: str) -> dict:
         "SELECT SUM(total), SUM(MIN(total, (SELECT COUNT(DISTINCT c.show_id) FROM claims c"
         "  WHERE c.artist_id = substr(t.key, 8) AND c.source = 'setlistfm'))), COUNT(*)"
         " FROM setlistfm_totals t WHERE t.key LIKE 'artist:%'").fetchone()
-    past = "s.date < ? AND s.is_festival = 0 AND s.status NOT IN ('cancelled', 'postponed')"
-    shows = one(f"SELECT COUNT(*) FROM shows s WHERE {past}", today)
+    lo = since or "0000-01-01"
+    past = "s.date < ? AND s.date >= ? AND s.is_festival = 0 AND s.status NOT IN ('cancelled', 'postponed')"
+    shows = one(f"SELECT COUNT(*) FROM shows s WHERE {past}", today, lo)
     settled = one(f"SELECT COUNT(*) FROM shows s WHERE {past} AND"
-                  " (SELECT COUNT(*) FROM billings b WHERE b.show_id = s.id) >= 2", today)
-    g_total = one("SELECT COUNT(*) FROM crawl_state WHERE source = 'gemini'")
-    g_checked = one("SELECT COUNT(*) FROM crawl_state WHERE source = 'gemini' AND last_checked IS NOT NULL")
+                  " (SELECT COUNT(*) FROM billings b WHERE b.show_id = s.id) >= 2", today, lo)
+    gem = ("FROM crawl_state g JOIN shows s ON s.id = CAST(substr(g.key, 6) AS INTEGER)"
+           " WHERE g.source = 'gemini' AND s.date >= ?")
+    g_total = one(f"SELECT COUNT(*) {gem}", lo)
+    g_checked = one(f"SELECT COUNT(*) {gem} AND g.last_checked IS NOT NULL", lo)
     g_out = dict(conn.execute(   # what came of it (the queue entry's cursor; see sources/gemini.py)
-        "SELECT COALESCE(json_extract(cursor, '$.outcome'), 'unrecorded'), COUNT(*) FROM crawl_state"
-        " WHERE source = 'gemini' AND last_checked IS NOT NULL GROUP BY 1").fetchall())
+        f"SELECT COALESCE(json_extract(g.cursor, '$.outcome'), 'unrecorded'), COUNT(*) {gem}"
+        " AND g.last_checked IS NOT NULL GROUP BY 1", (lo,)).fetchall())
+    if since:
+        recent_done = one(
+            f"SELECT COUNT(*) FROM crawl_state c WHERE {art} AND c.last_checked IS NOT NULL AND ("
+            "  c.cursor LIKE '%backfill_done%'"
+            "  OR json_extract(c.cursor, '$.reached') < ?"
+            "  OR (json_extract(c.cursor, '$.reached') IS NULL AND ("
+            # `+cl.source`: look claims up by artist (idx_claims_artist), not by source (20 s -> <1 s)
+            "      NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.artist_id = substr(c.key, 8) AND +cl.source = 'setlistfm')"
+            "      OR EXISTS (SELECT 1 FROM claims cl JOIN shows s ON s.id = cl.show_id"
+            "                 WHERE cl.artist_id = substr(c.key, 8) AND +cl.source = 'setlistfm' AND s.date < ?))))",
+            since, since)
 
     def part(key, label, num, den, num_label, den_label, note, breakdown=None):
         return {"key": key, "label": label, "num": num or 0, "den": den or 0, "num_label": num_label,
                 "den_label": den_label, "note": note, "pct": round(100 * (num or 0) / den, 1) if den else None,
                 "breakdown": breakdown or []}
 
+    period = f"since {since}" if since else ""
+    history = (part("history_held", "Their last 5 years fetched", recent_done, checked,
+                    f"checked artists with every setlist.fm show {period} fetched", "artists checked on setlist.fm",
+                    "setlist.fm gives no count per period, so this counts artists, not setlists.")
+               if since else
+               part("history_held", "Their setlists held", held, expected,
+                    "setlists we hold", "setlists setlist.fm lists for them",
+                    f"For the {known or 0:,} artists whose setlist.fm total we've seen."))
     parts = [
         part("artists_checked", "Artists checked on setlist.fm", checked, units,
              "artists setlist.fm has looked at", "artists we crawl",
              "Checked at least once (or found not to be on setlist.fm)."),
-        part("history_held", "Their setlists held", held, expected,
-             "setlists we hold", "setlists setlist.fm lists for them",
-             f"For the {known or 0:,} artists whose setlist.fm total we've seen."),
+        history,
         part("bills_settled", "Bills settled", settled, shows,
-             "past shows with 2+ acts", "past shows (not festivals, not cancelled)",
+             "past shows with 2+ acts" + (f" {period}" if since else ""),
+             "past shows" + (f" {period}" if since else "") + " (not festivals, not cancelled)",
              "A show with one act listed may be missing its openers."),
-        part("artists_full", "Artists with full history", full, units,
+        *([] if since else [part("artists_full", "Artists with full history", full, units,
              "artists with their whole setlist.fm history", "artists we crawl",
-             "The newest 10 pages come first; older history waits for the deep pass."),
+             "The newest 10 pages come first; older history waits for the deep pass.")]),
         part("gemini_checked", "Shows checked by Gemini", g_checked, g_total,
-             "shows Gemini has looked at", "shows checked or waiting for Gemini",
+             "shows Gemini has looked at" + (f" {period}" if since else ""),
+             "shows checked or waiting for Gemini" + (f" {period}" if since else ""),
              "Nothing found still counts as checked: those shows stay unknown and aren't asked again.",
              [[g_out[k], lab] for k, lab in (("specific", "bill confirmed"), ("page_only", "tour-wide only"),
                                             ("festival", "festival"), ("not_found", "nothing found"),
@@ -258,7 +301,7 @@ def coverage(conn: sqlite3.Connection, today: str) -> dict:
         overall = round(100 * (p["artists_checked"]["num"] / p["artists_checked"]["den"])
                         * (p["history_held"]["num"] / p["history_held"]["den"])
                         * (p["bills_settled"]["num"] / p["bills_settled"]["den"]), 2)
-    return {"overall": overall, "parts": parts}
+    return {"overall": overall, "parts": parts, "since": since}
 
 
 def run_metrics(conn: sqlite3.Connection) -> dict:
@@ -367,13 +410,16 @@ def collect(conn: sqlite3.Connection, today: date | None = None, snapshot: bool 
         db.begin_write(conn)
         # Each completeness part's numerator and denominator too, so its trend can be drawn later.
         cov = {p["key"]: [p["num"], p["den"]] for p in d["coverage"]["parts"]}
+        recent = {p["key"]: [p["num"], p["den"]] for p in d["coverage_recent"]["parts"]}
         conn.execute("INSERT OR REPLACE INTO metric_snapshots (taken_at, metrics) VALUES (?, ?)",
-                     (now.isoformat(), json.dumps({**{k: d[k] for k in HEADLINE}, "coverage": cov})))
+                     (now.isoformat(), json.dumps({**{k: d[k] for k in HEADLINE}, "coverage": cov,
+                                                   "coverage_recent": recent})))
         conn.commit()
     snaps = _snapshots(conn)
-    d["trend"] = [{k: v for k, v in s.items() if k != "coverage"} for s in snaps[-200:]]
+    d["trend"] = [{k: v for k, v in s.items() if k not in ("coverage", "coverage_recent")} for s in snaps[-200:]]
     since = (now - timedelta(days=COVERAGE_TREND_DAYS)).isoformat()
-    d["coverage_trend"] = [{"at": s["at"], "overall": s.get("coverage_pct"), "parts": s["coverage"]}
+    d["coverage_trend"] = [{"at": s["at"], "overall": s.get("coverage_pct"), "parts": s["coverage"],
+                            "recent_overall": s.get("coverage_recent_pct"), "recent": s.get("coverage_recent")}
                            for s in snaps if s["at"] >= since and s.get("coverage")]
     d["deltas"] = {}
     for label, ago in (("day", timedelta(days=1)), ("week", timedelta(days=7))):

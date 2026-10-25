@@ -323,17 +323,28 @@ const DATA = /*DATA*/null;
   tile(tiles, "Added in the last 7 days", d.added_7d, "new concerts in the ledger");
   tile(tiles, "Festivals", d.festivals, "kept as lineups, not opened-for");
 
-  // ---------- completeness: each part's % with its numerator and denominator on hover / tap
-  const cov = d.coverage;
-  if (cov) {
+  // ---------- completeness: each part's % with its numerator and denominator on hover / tap,
+  // for all time or the last 5 years (a toggle that also switches the trend charts below)
+  if (d.coverage) {
+    const VIEWS = {
+      all: {label: "All time", cov: d.coverage, delta: "coverage_pct", parts: x => x.parts, overall: x => x.overall,
+            sub: "100% would be every artist we crawl with every show setlist.fm knows of, each with its whole bill.",
+            formula: "Artists checked × their setlists held × bills settled."},
+      recent: {label: "Last 5 years", cov: d.coverage_recent, delta: "coverage_recent_pct", parts: x => x.recent,
+               overall: x => x.recent_overall,
+               sub: `Only shows since ${d.coverage_recent ? d.coverage_recent.since : "5 years ago"}: every artist we crawl with every show since then, each with its whole bill.`,
+               formula: "Artists checked × their last 5 years fetched × bills settled since then."},
+    };
+    let view = "all";
     el("h3", {style: "margin:20px 0 4px"}, app, "How complete is it?");
-    el("p", {class: "sub", style: "margin:0 0 8px"}, app, "100% would be every artist we crawl with every show setlist.fm knows of, each with its whole bill. Hover or tap a figure for the counts behind it.");
+    const vsw = el("div", {class: "legend", role: "group", "aria-label": "Which shows"}, app);
+    const subP = el("p", {class: "sub", style: "margin:4px 0 8px"}, app);
     const grid = el("div", {class: "grid cov"}, app);
     const pctTxt = v => v == null ? "–" : (v < 1 && v > 0 ? v.toFixed(2) : v.toFixed(1)) + "%";
     // Axis ticks: two significant digits below 1%, so small values don't repeat ("0.04%, 0.04%").
     const pctAxis = v => (v === 0 ? "0" : v < 1 ? String(+v.toPrecision(2)) : v < 10 ? v.toFixed(1) : v.toFixed(0)) + "%";
-    function covTile(label, value, rows, note, cls, deltaKey) {
-      const c = el("div", {class: "card " + (cls || ""), tabindex: 0, role: "button", "aria-label": label}, grid);
+    function covTile(label, value, rows, note, deltaKey) {
+      const c = el("div", {class: "card", tabindex: 0, role: "button", "aria-label": label}, grid);
       el("div", {class: "label", style: "color:var(--ink-2);font-size:13px"}, c, label);
       el("div", {class: "value"}, c, pctTxt(value));
       el("span", {}, el("div", {class: "bar"}, c)).style.width = Math.max(0, Math.min(100, value || 0)) + "%";
@@ -348,44 +359,57 @@ const DATA = /*DATA*/null;
       c.addEventListener("click", ev => { ev.stopPropagation(); show(ev); });
       c.addEventListener("focus", () => { const b = c.getBoundingClientRect(); show({clientX: b.left + 8, clientY: b.bottom - 8}); });
       c.addEventListener("blur", hideTip);
-      return c;
     }
-    const parts = Object.fromEntries(cov.parts.map(p => [p.key, p]));
     const rowsFor = p => [[fmt(p.num), p.num_label], [fmt(p.den), p.den_label],
       ...(p.breakdown || []).map(([n, lab]) => [fmt(n), "· " + lab])];
-    covTile("Overall (estimate)", cov.overall,
-      ["artists_checked", "history_held", "bills_settled"].map(k => [pctTxt(parts[k].pct), parts[k].label]),
-      "Artists checked × their setlists held × bills settled.", "", "coverage_pct");
-    cov.parts.forEach(p => covTile(p.label, p.pct, rowsFor(p), p.note));
+    function renderTiles() {
+      const V = VIEWS[view], cov = V.cov;
+      grid.replaceChildren(); subP.textContent = V.sub + " Hover or tap a figure for the counts behind it.";
+      const parts = Object.fromEntries(cov.parts.map(p => [p.key, p]));
+      covTile("Overall (estimate)", cov.overall,
+        ["artists_checked", "history_held", "bills_settled"].map(k => [pctTxt(parts[k].pct), parts[k].label]),
+        V.formula, V.delta);
+      cov.parts.forEach(p => covTile(p.label, p.pct, rowsFor(p), p.note));
+    }
     document.addEventListener("click", hideTip);
 
     // ---------- completeness over time (one small chart per figure; 7- or 30-day window)
     const ct = d.coverage_trend || [];
-    const tc = card(app, "Completeness over time", "Each figure every time the dashboard was written. Hover a line for the counts behind it.", "");
+    const tc = card(app, "Completeness over time", " ", "");
     tc.style.marginTop = "12px";
+    const tcSub = tc.querySelector(".sub");
     const sw = el("div", {class: "legend", role: "group", "aria-label": "Time window"}, tc);
     const windows = [[7, "Last 7 days"], [30, "Last 30 days"]];
     let days = 30;
-    const btns = windows.map(([n, lab]) => { const b = el("button", {type: "button", class: "win", "aria-pressed": String(n === days)}, sw, lab);
-      b.addEventListener("click", () => { days = n; btns.forEach((x, i) => x.setAttribute("aria-pressed", String(windows[i][0] === n))); covDraws.forEach(f => f()); });
-      return b; });
     const cg = el("div", {class: "grid cols3"}, tc);
-    const covDraws = [];
+    let covDraws = [];
     const inWindow = () => { const cut = Date.now() - days * 86400000; return ct.filter(s => +new Date(s.at) >= cut); };
-    const series = [{key: "overall", label: "Overall (estimate)"}, ...cov.parts.map(p => ({key: p.key, label: p.label, p}))];
-    series.forEach(s => {
-      const box = el("div", {}, cg);
-      el("div", {class: "sub", style: "margin:4px 0 0"}, box, s.label);
-      const slot = el("div", {class: "chart"}, box);
-      const f = () => { slot.replaceChildren();
-        const pts = inWindow().map(x => {
-          if (s.key === "overall") return x.overall == null ? null : {at: x.at, v: x.overall};
-          const nd = x.parts[s.key]; return nd && nd[1] ? {at: x.at, v: 100 * nd[0] / nd[1], n: nd[0], d: nd[1]} : null;
-        }).filter(Boolean);
-        drawLine(slot, pts, {h: 120, label: s.label + " over time", vfmt: pctTxt, afmt: pctAxis,
-          rows: s.p ? (pt => [[fmt(pt.n), s.p.num_label], [fmt(pt.d), s.p.den_label]]) : null}); };
-      covDraws.push(f); draws.push(f);
-    });
+    function renderTrend() {
+      const V = VIEWS[view];
+      tcSub.textContent = `${V.label}: each figure every time the dashboard was written. Hover a line for the counts behind it.`;
+      cg.replaceChildren(); covDraws = [];
+      [{key: "overall", label: "Overall (estimate)"}, ...V.cov.parts.map(p => ({key: p.key, label: p.label, p}))].forEach(s => {
+        const box = el("div", {}, cg);
+        el("div", {class: "sub", style: "margin:4px 0 0"}, box, s.label);
+        const slot = el("div", {class: "chart"}, box);
+        covDraws.push(() => { slot.replaceChildren();
+          const pts = inWindow().map(x => {
+            if (s.key === "overall") { const v = V.overall(x); return v == null ? null : {at: x.at, v}; }
+            const nd = (V.parts(x) || {})[s.key]; return nd && nd[1] ? {at: x.at, v: 100 * nd[0] / nd[1], n: nd[0], d: nd[1]} : null;
+          }).filter(Boolean);
+          drawLine(slot, pts, {h: 120, label: s.label + " over time", vfmt: pctTxt, afmt: pctAxis,
+            rows: s.p ? (pt => [[fmt(pt.n), s.p.num_label], [fmt(pt.d), s.p.den_label]]) : null}); });
+      });
+    }
+    draws.push(() => covDraws.forEach(f => f()));
+    const press = (btns, i) => btns.forEach((x, j) => x.setAttribute("aria-pressed", String(i === j)));
+    const wbtns = windows.map(([n, lab], i) => { const b = el("button", {type: "button", class: "win", "aria-pressed": String(n === days)}, sw, lab);
+      b.addEventListener("click", () => { days = n; press(wbtns, i); covDraws.forEach(f => f()); }); return b; });
+    const vbtns = Object.entries(VIEWS).filter(([, V]) => V.cov).map(([k, V], i) => {
+      const b = el("button", {type: "button", class: "win", "aria-pressed": String(k === view)}, vsw, V.label);
+      b.addEventListener("click", () => { view = k; press(vbtns, i); renderTiles(); renderTrend(); covDraws.forEach(f => f()); });
+      return b; });
+    renderTiles(); renderTrend();
   }
 
   const g1 = el("div", {class: "grid cols2", style: "margin-top:12px"}, app);
