@@ -20,6 +20,7 @@ STEPS = ["setlistfm", "gemini", "pollstar", "capture", "backup", "misses"]
 USAGE_SOURCES = ["setlistfm", "gemini", "contextdev", "searxng", "firecrawl", "pollstar", "jsonld"]
 USAGE_DAYS = 14
 NEW_SHOW_DAYS = 30
+COVERAGE_TREND_DAYS = 31            # completeness history sent to the page (7- and 30-day views)
 YEARS_SHOWN = 30
 BACKUP_STALE_HOURS = 26
 CONTEXTDEV_START = 51_000           # the free credits context.dev gave us (for the balance chart)
@@ -30,7 +31,7 @@ PRIORITY_SHOWN = 15                 # prioritized artists listed (the next ones 
 PRIORITY_DONE_SHOWN = 5             # and the ones it finished most recently
 # The headline numbers kept in metric_snapshots, for the trend charts and deltas.
 HEADLINE = ["concerts", "artists_with_concerts", "concerts_2plus", "opened_for_pairs",
-            "venues_with_concerts", "upcoming"]
+            "venues_with_concerts", "upcoming", "coverage_pct"]
 
 
 def _now() -> datetime:
@@ -112,6 +113,8 @@ def data_metrics(conn: sqlite3.Connection, today: date | None = None) -> dict:
         "SELECT json_extract(extra, '$.name_check') AS k, COUNT(DISTINCT artist_id) FROM claims"
         " WHERE source = 'gemini' AND extra LIKE '%name_check%' AND k IN ('truncated', 'description')"
         " GROUP BY k").fetchall())
+    m["coverage"] = coverage(conn, today)
+    m["coverage_pct"] = m["coverage"]["overall"]
     return m
 
 
@@ -192,6 +195,63 @@ def gemini_models(conn: sqlite3.Connection, used: dict, days: list[str], recent:
                       "discovered": f.get("discovered", 0)})
     return {"models": models, "days": rows, "has_earlier": any(earlier), "week": table,
             "limit": gemini.DAILY_LIMIT}
+
+
+def coverage(conn: sqlite3.Connection, today: str) -> dict:
+    """How complete the concert data is, as parts with a numerator and denominator each.
+
+    100% would be: every artist we crawl has every show setlist.fm knows of in the
+    ledger, and every past show has its whole bill. "Our artists" are the artist
+    units setlist.fm crawls (the graph's artists, plus prioritized ones). setlist.fm's
+    own count per artist is the only "expected shows" figure there is, and it's only
+    known for artists crawled at least once (setlistfm_totals), so `overall` is the
+    product of the parts and an estimate."""
+    one = lambda q, *a: conn.execute(q, a).fetchone()[0] or 0  # noqa: E731
+    art = "c.source = 'setlistfm' AND c.key LIKE 'artist:%'"
+    units = one(f"SELECT COUNT(*) FROM crawl_state c WHERE {art}")
+    checked = one(f"SELECT COUNT(*) FROM crawl_state c WHERE {art} AND c.last_checked IS NOT NULL")
+    full = one(f"SELECT COUNT(*) FROM crawl_state c WHERE {art} AND c.cursor LIKE '%backfill_done%'")
+    # Setlists held for artists whose total is known, capped at that total (a setlist.fm
+    # show can have been merged with another source's, or the total can lag).
+    expected, held, known = conn.execute(   # one indexed lookup per artist (idx_claims_artist)
+        "SELECT SUM(total), SUM(MIN(total, (SELECT COUNT(DISTINCT c.show_id) FROM claims c"
+        "  WHERE c.artist_id = substr(t.key, 8) AND c.source = 'setlistfm'))), COUNT(*)"
+        " FROM setlistfm_totals t WHERE t.key LIKE 'artist:%'").fetchone()
+    past = "s.date < ? AND s.is_festival = 0 AND s.status NOT IN ('cancelled', 'postponed')"
+    shows = one(f"SELECT COUNT(*) FROM shows s WHERE {past}", today)
+    settled = one(f"SELECT COUNT(*) FROM shows s WHERE {past} AND"
+                  " (SELECT COUNT(*) FROM billings b WHERE b.show_id = s.id) >= 2", today)
+    g_total = one("SELECT COUNT(*) FROM crawl_state WHERE source = 'gemini'")
+    g_checked = one("SELECT COUNT(*) FROM crawl_state WHERE source = 'gemini' AND last_checked IS NOT NULL")
+
+    def part(key, label, num, den, num_label, den_label, note):
+        return {"key": key, "label": label, "num": num or 0, "den": den or 0, "num_label": num_label,
+                "den_label": den_label, "note": note, "pct": round(100 * (num or 0) / den, 1) if den else None}
+
+    parts = [
+        part("artists_checked", "Artists checked on setlist.fm", checked, units,
+             "artists setlist.fm has looked at", "artists we crawl",
+             "Checked at least once (or found not to be on setlist.fm)."),
+        part("history_held", "Their setlists held", held, expected,
+             "setlists we hold", "setlists setlist.fm lists for them",
+             f"For the {known or 0:,} artists whose setlist.fm total we've seen."),
+        part("bills_settled", "Bills settled", settled, shows,
+             "past shows with 2+ acts", "past shows (not festivals, not cancelled)",
+             "A show with one act listed may be missing its openers."),
+        part("artists_full", "Artists with full history", full, units,
+             "artists with their whole setlist.fm history", "artists we crawl",
+             "The newest 10 pages come first; older history waits for the deep pass."),
+        part("gemini_checked", "Shows checked by Gemini", g_checked, g_total,
+             "shows Gemini has looked at", "shows queued for Gemini",
+             "Past one-act shows; \"nothing found\" still counts as checked."),
+    ]
+    p = {x["key"]: x for x in parts}
+    overall = None
+    if all(p[k]["den"] for k in ("artists_checked", "history_held", "bills_settled")):
+        overall = round(100 * (p["artists_checked"]["num"] / p["artists_checked"]["den"])
+                        * (p["history_held"]["num"] / p["history_held"]["den"])
+                        * (p["bills_settled"]["num"] / p["bills_settled"]["den"]), 2)
+    return {"overall": overall, "parts": parts}
 
 
 def run_metrics(conn: sqlite3.Connection) -> dict:
@@ -298,15 +358,21 @@ def collect(conn: sqlite3.Connection, today: date | None = None, snapshot: bool 
     now = _now()
     if snapshot:
         db.begin_write(conn)
+        # Each completeness part's numerator and denominator too, so its trend can be drawn later.
+        cov = {p["key"]: [p["num"], p["den"]] for p in d["coverage"]["parts"]}
         conn.execute("INSERT OR REPLACE INTO metric_snapshots (taken_at, metrics) VALUES (?, ?)",
-                     (now.isoformat(), json.dumps({k: d[k] for k in HEADLINE})))
+                     (now.isoformat(), json.dumps({**{k: d[k] for k in HEADLINE}, "coverage": cov})))
         conn.commit()
     snaps = _snapshots(conn)
-    d["trend"] = snaps[-200:]
+    d["trend"] = [{k: v for k, v in s.items() if k != "coverage"} for s in snaps[-200:]]
+    since = (now - timedelta(days=COVERAGE_TREND_DAYS)).isoformat()
+    d["coverage_trend"] = [{"at": s["at"], "overall": s.get("coverage_pct"), "parts": s["coverage"]}
+                           for s in snaps if s["at"] >= since and s.get("coverage")]
     d["deltas"] = {}
     for label, ago in (("day", timedelta(days=1)), ("week", timedelta(days=7))):
         base = _before(snaps, now - ago)
-        d["deltas"][label] = {k: d[k] - base[k] for k in HEADLINE if k in base} if base else None
+        d["deltas"][label] = {k: d[k] - base[k] for k in HEADLINE
+                              if base.get(k) is not None and d.get(k) is not None} if base else None
     r = run_metrics(conn)
     return {"generated_at": now.isoformat(), "data": d, "runs": r, "alerts": alerts(d, r),
             "review": review.flagged(conn)}
