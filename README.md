@@ -146,8 +146,9 @@ small Worker behind Cloudflare Access serves to your phone (docs/HOSTING.md,
 - **The runs**: the last run of each step (when, how long, finished or not,
   what it did), requests per day per source against their limits, the Gemini
   step's outcomes per run, context.dev credits left and when they run out,
-  new setlists per run, Pollstar's pace and pause, the last good backup, work
-  queues, and the last 40 steps.
+  new setlists per run, Pollstar's pace and pause, the last good backup, the
+  prioritized artists (the next 15 setlist.fm will crawl in full, and the last 5
+  finished, with their concerts so far), work queues, and the last 40 steps.
 - **Alerts** at the top: no backup in 26 hours, a failed or killed step,
   Pollstar paused, context.dev credits running out within two weeks, names to
   review (linked to the list).

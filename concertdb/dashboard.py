@@ -14,9 +14,9 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import db, export, review, runs, state, status
-from .sources import gemini, pollstar
+from .sources import gemini, pollstar, setlistfm
 
-STEPS = ["setlistfm", "gemini", "pollstar", "capture", "backup"]
+STEPS = ["setlistfm", "gemini", "pollstar", "capture", "backup", "misses"]
 USAGE_SOURCES = ["setlistfm", "gemini", "contextdev", "searxng", "firecrawl", "pollstar", "jsonld"]
 USAGE_DAYS = 14
 NEW_SHOW_DAYS = 30
@@ -25,7 +25,9 @@ BACKUP_STALE_HOURS = 26
 CONTEXTDEV_START = 51_000           # the free credits context.dev gave us (for the balance chart)
 # The process locks (cli._lock) a step runs under: Pollstar inside `run` or as its own process.
 STEP_LOCKS = {"pollstar": ("pollstar", "crawl"), "gemini": ("gemini",), "setlistfm": ("crawl",),
-              "capture": ("crawl",), "backup": ("crawl",)}
+              "capture": ("crawl",), "backup": ("crawl",), "misses": ("crawl",)}
+PRIORITY_SHOWN = 15                 # prioritized artists listed (the next ones setlist.fm will crawl)
+PRIORITY_DONE_SHOWN = 5             # and the ones it finished most recently
 # The headline numbers kept in metric_snapshots, for the trend charts and deltas.
 HEADLINE = ["concerts", "artists_with_concerts", "concerts_2plus", "opened_for_pairs",
             "venues_with_concerts", "upcoming"]
@@ -236,7 +238,32 @@ def run_metrics(conn: sqlite3.Connection) -> dict:
     s = status.summary(conn)
     r["queues"] = s["crawl"]
     r["setlistfm_deep_pending"] = s["setlistfm_deep_pending"]
+    r["prioritized"] = prioritized(conn)
     return r
+
+
+def prioritized(conn: sqlite3.Connection, shown: int = PRIORITY_SHOWN, done_shown: int = PRIORITY_DONE_SHOWN) -> dict:
+    """Artists queued at the `prioritize` priority (by hand, or from MusicSceneMap's search
+    misses): the next `shown` still to get their full setlist.fm history, in the order
+    setlist.fm will take them (state.due: priority, then due time), and the ones finished last."""
+    rows = conn.execute(
+        "SELECT c.key, c.next_due, c.last_checked, c.cursor, a.id, a.name, a.disambiguation,"
+        " (SELECT COUNT(DISTINCT b.show_id) FROM billings b WHERE b.artist_id = a.id) AS concerts"
+        " FROM crawl_state c LEFT JOIN artists a ON a.id = substr(c.key, 8)"
+        " WHERE c.source = ? AND c.key LIKE 'artist:%' AND c.priority >= ?"
+        " ORDER BY c.priority DESC, c.next_due ASC",
+        (setlistfm.SOURCE, setlistfm.NO_CAP_PRIORITY)).fetchall()
+
+    def item(r) -> dict:
+        cur = state.get_cursor(r)
+        return {"mbid": r["key"][7:], "name": r["name"] or r["key"][7:], "disambiguation": r["disambiguation"],
+                "concerts": r["concerts"] or 0, "last_checked": r["last_checked"], "next_due": r["next_due"],
+                "next_page": cur.get("next_page"), "done": bool(cur.get("backfill_done"))}
+
+    items = [item(r) for r in rows]
+    waiting = [x for x in items if not x["done"]]
+    done = sorted((x for x in items if x["done"]), key=lambda x: x["last_checked"] or "", reverse=True)
+    return {"waiting": len(waiting), "done": len(done), "next": waiting[:shown], "recent": done[:done_shown]}
 
 
 def alerts(d: dict, r: dict) -> list[dict]:
