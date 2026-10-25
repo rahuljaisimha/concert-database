@@ -79,6 +79,15 @@ td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
 .ok { color: var(--good-text); } .bad { color: var(--critical); }
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 13px; }
 .kv dt { color: var(--ink-2); } .kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+.cov { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+.cov .card { cursor: default; outline: none; }
+.cov .card:focus-visible { box-shadow: 0 0 0 2px var(--s1); }
+.cov .value { font-size: 26px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.win { font: inherit; font-size: 12px; padding: 4px 12px; min-height: 36px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--ring); background: var(--surface); color: var(--ink-2); }
+.win[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+.bar { height: 6px; border-radius: 3px; background: var(--grid); margin: 8px 0 6px; overflow: hidden; }
+.bar > span { display: block; height: 100%; background: var(--s1); border-radius: 3px; }
 .alerts a { color: inherit; }
 details.review-card { margin-top: 12px; font-size: inherit; scroll-margin-top: 12px; }
 .review-card > summary { list-style: none; cursor: pointer; color: inherit; display: flex; flex-wrap: wrap;
@@ -229,7 +238,7 @@ const DATA = /*DATA*/null;
     const X = t => L + (W - L - R) * (t - x0) / ((x1 - x0) || 1), Y = v => T + (H - T - B) * (1 - (v - lo) / ((top - lo) || 1));
     for (let i = 0; i <= 4; i++) { const v = lo + (top - lo) * i / 4;
       el("svg:line", {x1: L, x2: W - R, y1: Y(v), y2: Y(v), stroke: css("--grid")}, svg);
-      el("svg:text", {x: L - 6, y: Y(v) + 4, "text-anchor": "end"}, svg, compact(v)); }
+      el("svg:text", {x: L - 6, y: Y(v) + 4, "text-anchor": "end"}, svg, (opts.afmt || opts.vfmt || compact)(v)); }
     [x0, x1].forEach((t, i) => el("svg:text", {x: X(t), y: H - 6, "text-anchor": i ? "end" : "start"}, svg,
       new Date(t).toLocaleDateString(undefined, {month: "short", day: "numeric"})));
     const color = opts.color || css("--s1");
@@ -238,7 +247,7 @@ const DATA = /*DATA*/null;
     el("svg:path", {d: dPath, fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round"}, svg);
     const last = pts[pts.length - 1];
     el("svg:circle", {cx: X(x1), cy: Y(last.v), r: 4, fill: color, stroke: css("--surface"), "stroke-width": 2}, svg);
-    el("svg:text", {x: X(x1) - 6, y: Y(last.v) - 8, "text-anchor": "end", class: "val"}, svg, compact(last.v));
+    el("svg:text", {x: X(x1) - 6, y: Y(last.v) - 8, "text-anchor": "end", class: "val"}, svg, (opts.vfmt || compact)(last.v));
     const cross = el("svg:line", {y1: T, y2: H - B, stroke: css("--axis"), visibility: "hidden"}, svg);
     const dot = el("svg:circle", {r: 4, fill: color, stroke: css("--surface"), "stroke-width": 2, visibility: "hidden"}, svg);
     const hit = el("svg:rect", {x: L, y: T, width: W - L - R, height: H - T - B, class: "hit"}, svg);
@@ -247,7 +256,7 @@ const DATA = /*DATA*/null;
       let i = 0; xs.forEach((x, j) => { if (Math.abs(x - t) < Math.abs(xs[i] - t)) i = j; });
       cross.setAttribute("x1", X(xs[i])); cross.setAttribute("x2", X(xs[i])); cross.setAttribute("visibility", "visible");
       dot.setAttribute("cx", X(xs[i])); dot.setAttribute("cy", Y(pts[i].v)); dot.setAttribute("visibility", "visible");
-      showTip(ev, when(pts[i].at), [[fmt(pts[i].v), opts.unit || "", color]]); });
+      showTip(ev, when(pts[i].at), [[(opts.vfmt || fmt)(pts[i].v), opts.unit || "", color], ...(opts.rows ? opts.rows(pts[i]) : [])]); });
     hit.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); hideTip(); });
   }
   // Horizontal bars (top N).
@@ -313,6 +322,70 @@ const DATA = /*DATA*/null;
   tile(tiles, "Upcoming concerts", d.upcoming, null, "upcoming");
   tile(tiles, "Added in the last 7 days", d.added_7d, "new concerts in the ledger");
   tile(tiles, "Festivals", d.festivals, "kept as lineups, not opened-for");
+
+  // ---------- completeness: each part's % with its numerator and denominator on hover / tap
+  const cov = d.coverage;
+  if (cov) {
+    el("h3", {style: "margin:20px 0 4px"}, app, "How complete is it?");
+    el("p", {class: "sub", style: "margin:0 0 8px"}, app, "100% would be every artist we crawl with every show setlist.fm knows of, each with its whole bill. Hover or tap a figure for the counts behind it.");
+    const grid = el("div", {class: "grid cov"}, app);
+    const pctTxt = v => v == null ? "–" : (v < 1 && v > 0 ? v.toFixed(2) : v.toFixed(1)) + "%";
+    // Axis ticks: two significant digits below 1%, so small values don't repeat ("0.04%, 0.04%").
+    const pctAxis = v => (v === 0 ? "0" : v < 1 ? String(+v.toPrecision(2)) : v < 10 ? v.toFixed(1) : v.toFixed(0)) + "%";
+    function covTile(label, value, rows, note, cls, deltaKey) {
+      const c = el("div", {class: "card " + (cls || ""), tabindex: 0, role: "button", "aria-label": label}, grid);
+      el("div", {class: "label", style: "color:var(--ink-2);font-size:13px"}, c, label);
+      el("div", {class: "value"}, c, pctTxt(value));
+      el("span", {}, el("div", {class: "bar"}, c)).style.width = Math.max(0, Math.min(100, value || 0)) + "%";
+      if (deltaKey && d.deltas.week && d.deltas.week[deltaKey] != null) {
+        const v = d.deltas.week[deltaKey];
+        el("div", {class: "delta" + (v > 0 ? " up" : "")}, c, (v > 0 ? "+" : v < 0 ? "−" : "±") + Math.abs(v).toFixed(2) + " points in 7 days");
+      }
+      if (note) el("div", {class: "note", style: "color:var(--muted);font-size:12px"}, c, note);
+      const show = ev => showTip(ev, label, rows);
+      c.addEventListener("pointermove", show);
+      c.addEventListener("pointerleave", hideTip);
+      c.addEventListener("click", ev => { ev.stopPropagation(); show(ev); });
+      c.addEventListener("focus", () => { const b = c.getBoundingClientRect(); show({clientX: b.left + 8, clientY: b.bottom - 8}); });
+      c.addEventListener("blur", hideTip);
+      return c;
+    }
+    const parts = Object.fromEntries(cov.parts.map(p => [p.key, p]));
+    const rowsFor = p => [[fmt(p.num), p.num_label], [fmt(p.den), p.den_label]];
+    covTile("Overall (estimate)", cov.overall,
+      ["artists_checked", "history_held", "bills_settled"].map(k => [pctTxt(parts[k].pct), parts[k].label]),
+      "Artists checked × their setlists held × bills settled.", "", "coverage_pct");
+    cov.parts.forEach(p => covTile(p.label, p.pct, rowsFor(p), p.note));
+    document.addEventListener("click", hideTip);
+
+    // ---------- completeness over time (one small chart per figure; 7- or 30-day window)
+    const ct = d.coverage_trend || [];
+    const tc = card(app, "Completeness over time", "Each figure every time the dashboard was written. Hover a line for the counts behind it.", "");
+    tc.style.marginTop = "12px";
+    const sw = el("div", {class: "legend", role: "group", "aria-label": "Time window"}, tc);
+    const windows = [[7, "Last 7 days"], [30, "Last 30 days"]];
+    let days = 30;
+    const btns = windows.map(([n, lab]) => { const b = el("button", {type: "button", class: "win", "aria-pressed": String(n === days)}, sw, lab);
+      b.addEventListener("click", () => { days = n; btns.forEach((x, i) => x.setAttribute("aria-pressed", String(windows[i][0] === n))); covDraws.forEach(f => f()); });
+      return b; });
+    const cg = el("div", {class: "grid cols3"}, tc);
+    const covDraws = [];
+    const inWindow = () => { const cut = Date.now() - days * 86400000; return ct.filter(s => +new Date(s.at) >= cut); };
+    const series = [{key: "overall", label: "Overall (estimate)"}, ...cov.parts.map(p => ({key: p.key, label: p.label, p}))];
+    series.forEach(s => {
+      const box = el("div", {}, cg);
+      el("div", {class: "sub", style: "margin:4px 0 0"}, box, s.label);
+      const slot = el("div", {class: "chart"}, box);
+      const f = () => { slot.replaceChildren();
+        const pts = inWindow().map(x => {
+          if (s.key === "overall") return x.overall == null ? null : {at: x.at, v: x.overall};
+          const nd = x.parts[s.key]; return nd && nd[1] ? {at: x.at, v: 100 * nd[0] / nd[1], n: nd[0], d: nd[1]} : null;
+        }).filter(Boolean);
+        drawLine(slot, pts, {h: 120, label: s.label + " over time", vfmt: pctTxt, afmt: pctAxis,
+          rows: s.p ? (pt => [[fmt(pt.n), s.p.num_label], [fmt(pt.d), s.p.den_label]]) : null}); };
+      covDraws.push(f); draws.push(f);
+    });
+  }
 
   const g1 = el("div", {class: "grid cols2", style: "margin-top:12px"}, app);
   let c = card(g1, "Acts per concert", "How many acts we know for each concert. 1 act usually means the openers are still missing.");

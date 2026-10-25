@@ -140,6 +140,15 @@ CREATE TABLE IF NOT EXISTS runs (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_runs_step ON runs(step, started_at);
 
+-- How many setlists setlist.fm says a unit has (`total` on every page; 0 when
+-- setlist.fm doesn't know the artist): the denominator of the dashboard's
+-- "history held" coverage.
+CREATE TABLE IF NOT EXISTS setlistfm_totals (
+    key     TEXT PRIMARY KEY,              -- crawl_state key: artist:<mbid> | venue:<id>
+    total   INTEGER NOT NULL,
+    seen_at TEXT NOT NULL
+) STRICT;
+
 -- The dashboard's headline numbers each time it is written, for trends.
 CREATE TABLE IF NOT EXISTS metric_snapshots (
     taken_at TEXT PRIMARY KEY,

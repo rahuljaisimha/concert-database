@@ -195,3 +195,41 @@ def test_prioritized_artists_in_queue_order(ledger_with_shows):
     assert dashboard.prioritized(conn, shown=1)["next"][0]["name"] == "Fomies"
     html = dashboard.render(dashboard.collect(conn, snapshot=False))
     assert 'c.id = "prioritized"' in html and "Psychedelic Porn Crumpets" in html
+
+
+def test_coverage_parts_and_overall(ledger_with_shows):
+    conn = ledger_with_shows
+    from concertdb import state
+    from concertdb.sources import setlistfm
+    for mbid in ("mb-idc", "mb-fw", "mb-x"):
+        state.ensure(conn, setlistfm.SOURCE, f"artist:{mbid}")
+    conn.execute("UPDATE crawl_state SET last_checked = '2026-10-20T00:00:00+00:00', cursor = '{\"backfill_done\": true}'"
+                 " WHERE key = 'artist:mb-fw'")
+    conn.execute("UPDATE crawl_state SET last_checked = '2026-10-20T00:00:00+00:00' WHERE key = 'artist:mb-idc'")
+    setlistfm.record_total(conn, "artist:mb-fw", 8)      # holds 4 (show() adds setlistfm claims)
+    setlistfm.record_total(conn, "artist:mb-idc", 1)     # holds 2: capped at its total
+    state.ensure(conn, "gemini", "show:1"); state.ensure(conn, "gemini", "show:2")
+    conn.execute("UPDATE crawl_state SET last_checked = '2026-10-20T00:00:00+00:00' WHERE key = 'show:1'")
+    conn.commit()
+    cov = dashboard.coverage(conn, "2026-10-20")
+    p = {x["key"]: x for x in cov["parts"]}
+    assert (p["artists_checked"]["num"], p["artists_checked"]["den"]) == (2, 3)
+    assert (p["artists_full"]["num"], p["artists_full"]["den"]) == (1, 3)
+    assert (p["history_held"]["num"], p["history_held"]["den"]) == (5, 9)
+    assert (p["bills_settled"]["num"], p["bills_settled"]["den"]) == (2, 3)    # past: 2 two-act shows of 3
+    assert (p["gemini_checked"]["num"], p["gemini_checked"]["den"]) == (1, 2)
+    assert cov["overall"] == round(100 * 2 / 3 * 5 / 9 * 2 / 3, 2)
+    info = dashboard.collect(conn, today=date(2026, 10, 20), snapshot=True)
+    assert info["data"]["coverage_pct"] == cov["overall"]
+    trend = info["data"]["coverage_trend"]
+    assert len(trend) == 1 and trend[0]["overall"] == cov["overall"]
+    assert trend[0]["parts"]["history_held"] == [5, 9]          # counts kept, not just percentages
+    stored = json.loads(conn.execute("SELECT metrics FROM metric_snapshots").fetchone()[0])
+    assert stored["coverage"]["artists_checked"] == [2, 3]
+    assert "coverage" not in info["data"]["trend"][0]           # the growth charts' data stays as it was
+    html = dashboard.render(info)
+    assert "How complete is it?" in html and "Completeness over time" in html and '"num_label"' in html
+
+
+def test_coverage_without_any_totals_has_no_overall(conn):
+    assert dashboard.coverage(conn, "2026-10-20")["overall"] is None

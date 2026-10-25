@@ -280,3 +280,13 @@ def test_no_write_lock_held_during_requests_or_backoff(tmp_path, monkeypatch):
     stats = setlistfm.crawl(conn, Checking(pages), max_requests=10, log=lambda *_: None)
     assert stats["new"] == 4
     assert len(checks) >= 4   # page 1, page 2 (429), backoff sleep, page 2, then the venues found
+
+
+def test_setlistfm_totals_are_recorded(conn):
+    state.ensure(conn, "setlistfm", f"artist:{OSEES}", priority=5)
+    state.ensure(conn, "setlistfm", "artist:unknown-mbid")
+    pages = [setlist_page([_sl(1), _sl(2)], total=3, per_page=2), setlist_page([_sl(3)], total=3, page=2, per_page=2)]
+    setlistfm.crawl(conn, FakeSetlistClient({("artist", OSEES): pages}), max_requests=10, log=lambda *_: None)
+    totals = dict(conn.execute("SELECT key, total FROM setlistfm_totals").fetchall())
+    assert totals[f"artist:{OSEES}"] == 3
+    assert totals["artist:unknown-mbid"] == 0          # not on setlist.fm: nothing missing

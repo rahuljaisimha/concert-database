@@ -166,6 +166,13 @@ def reinfer_show(conn: sqlite3.Connection, show_id: int) -> None:
 
 # ----------------------------------------------------------------- crawl
 
+def record_total(conn: sqlite3.Connection, key: str, total: int) -> None:
+    """setlist.fm's own count of a unit's setlists (the dashboard's coverage denominator)."""
+    conn.execute("INSERT INTO setlistfm_totals (key, total, seen_at) VALUES (?, ?, ?)"
+                 " ON CONFLICT (key) DO UPDATE SET total = excluded.total, seen_at = excluded.seen_at",
+                 (key, total, state._iso(state._now())))
+
+
 def crawl(conn: sqlite3.Connection, client: Client, max_requests: int, log=print) -> dict:
     """Spend up to max_requests (and never more than DAILY_LIMIT today)."""
     stats = {"requests": 0, "setlists": 0, "new": 0, "units": 0, "rate_limited": 0, "network_errors": 0,
@@ -240,6 +247,7 @@ def _crawl_unit(conn, client, row, stats, budget_left, log) -> None:
         state.record_usage(conn, SOURCE)
         if resp.status == 404:
             log(f"  {key}: not on setlist.fm")
+            record_total(conn, key, 0)
             state.postpone(conn, SOURCE, key, NOT_FOUND_DAYS)
             return
         if resp.status == 429:
@@ -278,6 +286,7 @@ def _crawl_unit(conn, client, row, stats, budget_left, log) -> None:
         any_new = any_new or new_on_page > 0
 
         total = int(data.get("total", 0))
+        record_total(conn, key, total)
         per_page = int(data.get("itemsPerPage", 20)) or 20
         last_page = page * per_page >= total or not setlists
 
