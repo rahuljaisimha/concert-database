@@ -485,6 +485,26 @@ const DATA = /*DATA*/null;
    ["Backup size", bk.bytes ? compact(bk.bytes) + "B" : "–"], ["Uploaded to R2", bk.uploaded == null ? "–" : bk.uploaded ? "yes" : "no"]]
     .forEach(([k, v]) => { el("dt", {}, kv, k); el("dd", {}, kv, v); });
 
+  // ---------- prioritized artists (concertdb prioritize / MusicSceneMap search misses)
+  const pr = r.prioritized;
+  c = card(app, "Prioritized artists", `Crawled before everything else on setlist.fm, full history at once: artists you prioritized and ones MusicSceneMap users looked for and didn't find. ${fmt(pr.waiting)} waiting · ${fmt(pr.done)} done.`);
+  c.id = "prioritized"; c.style.marginTop = "12px";
+  if (pr.next.length) {
+    const det = table(c, [{label: "#", n: 1, f: x => fmt(x.pos)},
+      {label: "Artist", f: x => x.name + (x.disambiguation ? ` (${x.disambiguation})` : "")},
+      {label: "Status", f: x => x.last_checked ? `in progress · page ${x.next_page ?? "?"} next` : "not started"},
+      {label: "Concerts so far", n: 1, f: x => fmt(x.concerts)}],
+      pr.next.map((x, i) => ({...x, pos: i + 1})), true);
+    det.querySelector("summary").textContent = pr.waiting > pr.next.length ? `Next ${pr.next.length} of ${fmt(pr.waiting)}` : "Up next";
+  } else {
+    el("p", {class: "sub"}, c, "Nothing waiting: every prioritized artist has its full history.");
+  }
+  if (pr.recent.length) {
+    const det = table(c, [{label: "Artist", f: x => x.name + (x.disambiguation ? ` (${x.disambiguation})` : "")},
+      {label: "Finished", f: x => when(x.last_checked)}, {label: "Concerts", n: 1, f: x => fmt(x.concerts)}], pr.recent, false);
+    det.querySelector("summary").textContent = "Recently finished";
+  }
+
   c = card(app, "Work queues", "Units of work per source: due now, ever checked, failing.");
   c.style.marginTop = "12px";
   table(c, [{label: "Source", key: "source"}, {label: "Due now", n: 1, f: x => fmt(x.due)}, {label: "Checked", n: 1, f: x => fmt(x.checked)},

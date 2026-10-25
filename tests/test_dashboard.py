@@ -171,3 +171,27 @@ def test_gemini_calls_by_model(conn, monkeypatch):
     assert (a["calls"], a["tokens"], a["tokens_per_call"]) == (500, 3_000_000, 6000)
     assert (b["calls"], b["specific"], b["page"]) == (150, 1, 0)
     assert dashboard.collect(conn, snapshot=False)["runs"]["limits"]["gemini"] == 2 * gemini.DAILY_LIMIT
+
+
+def test_prioritized_artists_in_queue_order(ledger_with_shows):
+    conn = ledger_with_shows
+    from concertdb import seed, state
+    from concertdb.sources import setlistfm
+    add_graph_artist(conn, "mb-a", "Psychedelic Porn Crumpets")
+    add_graph_artist(conn, "mb-b", "Fomies")
+    seed.prioritize(conn, ["mb-a", "mb-b", "mb-fw"])
+    conn.execute("UPDATE crawl_state SET next_due = '2026-10-01T00:00:00+00:00' WHERE key = 'artist:mb-b'")
+    state.save_cursor(conn, setlistfm.SOURCE, "artist:mb-a", {"next_page": 3})
+    conn.execute("UPDATE crawl_state SET last_checked = '2026-10-25T02:00:00+00:00' WHERE key = 'artist:mb-a'")
+    state.save_cursor(conn, setlistfm.SOURCE, "artist:mb-fw", {"backfill_done": True})
+    conn.execute("UPDATE crawl_state SET last_checked = '2026-10-24T02:00:00+00:00' WHERE key = 'artist:mb-fw'")
+    state.ensure(conn, setlistfm.SOURCE, "artist:mb-idc")          # an ordinary unit: not listed
+    conn.commit()
+    p = dashboard.prioritized(conn)
+    assert p["waiting"] == 2 and p["done"] == 1
+    assert [x["name"] for x in p["next"]] == ["Fomies", "Psychedelic Porn Crumpets"]   # due first, first in line
+    assert p["next"][1]["next_page"] == 3 and p["next"][0]["last_checked"] is None
+    assert [(x["name"], x["concerts"]) for x in p["recent"]] == [("Flat Worms", 4)]
+    assert dashboard.prioritized(conn, shown=1)["next"][0]["name"] == "Fomies"
+    html = dashboard.render(dashboard.collect(conn, snapshot=False))
+    assert 'c.id = "prioritized"' in html and "Psychedelic Porn Crumpets" in html
