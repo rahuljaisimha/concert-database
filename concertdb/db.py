@@ -5,6 +5,7 @@ JSON as text) so the database can later be moved to Postgres with pgloader
 without surprises. See docs/ARCHITECTURE.md.
 """
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -65,7 +66,11 @@ CREATE TABLE IF NOT EXISTS shows (
     is_festival INTEGER NOT NULL DEFAULT 0 CHECK (is_festival IN (0, 1)),
     final       INTEGER NOT NULL DEFAULT 0 CHECK (final IN (0, 1)),
     created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
+    updated_at  TEXT NOT NULL,
+    -- Every source that has looked at this show, in the order they first did (JSON array,
+    -- e.g. ["setlistfm","gemini"]). Cumulative: a source that found nothing is listed too,
+    -- and nothing is ever taken off (ledger.note_source).
+    sources     TEXT NOT NULL DEFAULT '[]'
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_shows_venue_date ON shows(venue_id, date);
 CREATE INDEX IF NOT EXISTS idx_shows_date ON shows(date);
@@ -186,6 +191,25 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(artists)")}
     if "disambiguation" not in cols:
         conn.execute("ALTER TABLE artists ADD COLUMN disambiguation TEXT")
+    if "sources" not in {r["name"] for r in conn.execute("PRAGMA table_info(shows)")}:
+        _add_show_sources(conn)
+
+
+def _add_show_sources(conn: sqlite3.Connection) -> None:
+    """shows.sources for a ledger made before it: the sources of each show's claims, in the
+    order they first claimed something, then Gemini for the shows it looked at without
+    finding anything (its queue entries; see sources/gemini.py)."""
+    conn.execute("ALTER TABLE shows ADD COLUMN sources TEXT NOT NULL DEFAULT '[]'")
+    lists: dict[int, list[str]] = {}
+    for r in conn.execute("SELECT show_id, source, MIN(seen_at) AS first FROM claims"
+                          " GROUP BY show_id, source ORDER BY show_id, first"):
+        lists.setdefault(r["show_id"], []).append(r["source"])
+    for r in conn.execute("SELECT key FROM crawl_state WHERE source = 'gemini' AND last_checked IS NOT NULL"):
+        sid = int(r["key"].split(":", 1)[1])
+        if "gemini" not in lists.setdefault(sid, []):
+            lists[sid].append("gemini")
+    conn.executemany("UPDATE shows SET sources = ? WHERE id = ?",
+                     ((json.dumps(v, separators=(",", ":")), k) for k, v in lists.items() if v))
 
 
 def attach_musicbrainz(conn: sqlite3.Connection, path) -> None:

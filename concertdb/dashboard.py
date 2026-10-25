@@ -223,10 +223,14 @@ def coverage(conn: sqlite3.Connection, today: str) -> dict:
                   " (SELECT COUNT(*) FROM billings b WHERE b.show_id = s.id) >= 2", today)
     g_total = one("SELECT COUNT(*) FROM crawl_state WHERE source = 'gemini'")
     g_checked = one("SELECT COUNT(*) FROM crawl_state WHERE source = 'gemini' AND last_checked IS NOT NULL")
+    g_out = dict(conn.execute(   # what came of it (the queue entry's cursor; see sources/gemini.py)
+        "SELECT COALESCE(json_extract(cursor, '$.outcome'), 'unrecorded'), COUNT(*) FROM crawl_state"
+        " WHERE source = 'gemini' AND last_checked IS NOT NULL GROUP BY 1").fetchall())
 
-    def part(key, label, num, den, num_label, den_label, note):
+    def part(key, label, num, den, num_label, den_label, note, breakdown=None):
         return {"key": key, "label": label, "num": num or 0, "den": den or 0, "num_label": num_label,
-                "den_label": den_label, "note": note, "pct": round(100 * (num or 0) / den, 1) if den else None}
+                "den_label": den_label, "note": note, "pct": round(100 * (num or 0) / den, 1) if den else None,
+                "breakdown": breakdown or []}
 
     parts = [
         part("artists_checked", "Artists checked on setlist.fm", checked, units,
@@ -242,8 +246,11 @@ def coverage(conn: sqlite3.Connection, today: str) -> dict:
              "artists with their whole setlist.fm history", "artists we crawl",
              "The newest 10 pages come first; older history waits for the deep pass."),
         part("gemini_checked", "Shows checked by Gemini", g_checked, g_total,
-             "shows Gemini has looked at", "shows queued for Gemini",
-             "Past one-act shows; \"nothing found\" still counts as checked."),
+             "shows Gemini has looked at", "shows checked or waiting for Gemini",
+             "Nothing found still counts as checked: those shows stay unknown and aren't asked again.",
+             [[g_out[k], lab] for k, lab in (("specific", "bill confirmed"), ("page_only", "tour-wide only"),
+                                            ("festival", "festival"), ("not_found", "nothing found"),
+                                            ("unrecorded", "outcome not recorded")) if g_out.get(k)]),
     ]
     p = {x["key"]: x for x in parts}
     overall = None

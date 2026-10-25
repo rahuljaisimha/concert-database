@@ -223,6 +223,22 @@ def _other_event(claims, artist_ids: set, source: str | None, native_id: str | N
     return False
 
 
+def note_source(conn: sqlite3.Connection, show_id: int, source: str) -> None:
+    """Add a source to the show's cumulative `sources` list (if it isn't there yet). Every
+    claim does this; a source that looked at a show and found nothing calls it itself."""
+    conn.execute(
+        "UPDATE shows SET sources = json_insert(sources, '$[#]', ?) WHERE id = ?"
+        " AND NOT EXISTS (SELECT 1 FROM json_each(shows.sources) WHERE value = ?)",
+        (source, show_id, source))
+
+
+def merge_sources(conn: sqlite3.Connection, from_show: int, to_show: int) -> None:
+    """A record moved shows: the show it went to inherits every source of the one it left."""
+    row = conn.execute("SELECT sources FROM shows WHERE id = ?", (from_show,)).fetchone()
+    for s in json.loads(row["sources"]) if row else []:
+        note_source(conn, to_show, s)
+
+
 def drop_show_if_empty(conn: sqlite3.Connection, show_id: int) -> bool:
     if conn.execute("SELECT 1 FROM claims WHERE show_id = ? LIMIT 1", (show_id,)).fetchone():
         return False
@@ -254,6 +270,7 @@ def add_claim(
     resolve: bool = True,
 ) -> bool:
     """Insert or update a claim. Returns True if anything changed."""
+    note_source(conn, show_id, source)
     extra_json = json.dumps(extra, sort_keys=True) if extra else None
     old = conn.execute(
         "SELECT show_id, role, position, confidence, extra FROM claims"
@@ -277,6 +294,7 @@ def add_claim(
         resolve_show(conn, show_id)
     if old and old["show_id"] != show_id:
         # The record moved (e.g. a rescheduled event): fix up the show it left.
+        merge_sources(conn, old["show_id"], show_id)
         if not drop_show_if_empty(conn, old["show_id"]):
             resolve_show(conn, old["show_id"])
     return True

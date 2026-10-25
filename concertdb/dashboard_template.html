@@ -351,7 +351,8 @@ const DATA = /*DATA*/null;
       return c;
     }
     const parts = Object.fromEntries(cov.parts.map(p => [p.key, p]));
-    const rowsFor = p => [[fmt(p.num), p.num_label], [fmt(p.den), p.den_label]];
+    const rowsFor = p => [[fmt(p.num), p.num_label], [fmt(p.den), p.den_label],
+      ...(p.breakdown || []).map(([n, lab]) => [fmt(n), "· " + lab])];
     covTile("Overall (estimate)", cov.overall,
       ["artists_checked", "history_held", "bills_settled"].map(k => [pctTxt(parts[k].pct), parts[k].label]),
       "Artists checked × their setlists held × bills settled.", "", "coverage_pct");
