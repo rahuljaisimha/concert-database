@@ -8,10 +8,14 @@ the user. Sources so far:
 
   setlistfm  key = setlist id         the setlist as setlist.fm returned it
                                       (MusicSceneMap's venue-search function)
-  pollstar   key = Pollstar venue id  { venue, events }: the venue's id, name,
-                                      city, state, location and its upcoming
-                                      events cut down to what we read (fetched in
-                                      visitors' browsers by Discover)
+  pollstar   key = Pollstar venue id  { venue, ...Pollstar's events response }:
+                                      the venue's id, name, city, state, location
+                                      (from Pollstar's venue search) and its
+                                      upcoming events, fetched by MusicSceneMap's
+                                      pollstar-events function for Discover
+  pollstar_search  key = a venue search  Pollstar's autocomplete response: that
+                                      function's cache of venue searches; nothing
+                                      to store here, skipped
 
 Each run reads the rows past the last `seq` it handled (meta
 `msm_requested_last_seq`) through the same read-only login as the search
@@ -25,9 +29,7 @@ without spending our requests:
   pollstar   the venue linked like `pollstar-add` (a new one is created and
              queued for our own Pollstar crawl), its events through
              pollstar.parse_events / ingest_event with extra.via
-             "musicscenemap": anyone can call MusicSceneMap's
-             user-requested-data function, so the marker makes these claims
-             easy to find and drop
+             "musicscenemap" (where they came from)
 
 A row from a source with no ingest here is skipped (counted); an unreadable
 row is skipped too. A new source: an ingest function in INGEST.
@@ -86,7 +88,11 @@ def _pollstar(conn: sqlite3.Connection, data: dict, stats: dict) -> None:
     stats["pollstar_events"] += len(events)
 
 
-INGEST = {"setlistfm": _setlist, "pollstar": _pollstar}
+def _skip(conn: sqlite3.Connection, data: dict, stats: dict) -> None:
+    stats["skipped"] += 1
+
+
+INGEST = {"setlistfm": _setlist, "pollstar": _pollstar, "pollstar_search": _skip}
 
 
 def _cursor(conn: sqlite3.Connection) -> int:
@@ -99,7 +105,7 @@ def import_requested(conn: sqlite3.Connection, fetch, log=print) -> dict:
     after = _cursor(conn)
     rows = fetch(after)
     stats = {"rows": len(rows), "setlists": 0, "setlists_unchanged": 0, "pollstar_venues": 0,
-             "pollstar_new_venues": 0, "pollstar_events": 0, "unknown_source": 0, "unreadable": 0}
+             "pollstar_new_venues": 0, "pollstar_events": 0, "skipped": 0, "unknown_source": 0, "unreadable": 0}
     done_through = after
     db.begin_write(conn)
     for seq, source, data in rows:

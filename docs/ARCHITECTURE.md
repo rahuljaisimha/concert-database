@@ -210,11 +210,13 @@ version changes. Nothing in it is about the user. Sources so far:
 - `setlistfm` (key: setlist id): every setlist MusicSceneMap's venue-search
   function fetches (an artist's setlists in a city, then each venue's), as
   setlist.fm returned it.
-- `pollstar` (key: Pollstar venue id): a venue's upcoming events fetched in
-  visitors' browsers by Discover, handed to MusicSceneMap's
-  user-requested-data function, which keeps only what we read (the venue's id,
-  name, city, state, location; each event's id, name, playDate, url,
-  isFestival and acts with their headliner flag).
+- `pollstar` (key: Pollstar venue id): a venue (id, name, city, state,
+  location, from Pollstar's venue search) and Pollstar's response for its
+  upcoming events, fetched by MusicSceneMap's pollstar-events function for its
+  Discover page (Pollstar is asked server-side, at most once a day per venue,
+  and every visitor is served from the cache).
+- `pollstar_search` (key: a venue search): that function's cache of Pollstar's
+  venue searches; skipped here.
 
 The second step of every `run` (or `concertdb msm-requested`) reads the rows
 past `meta.msm_requested_last_seq` (at most 5,000) with the same login as the
@@ -227,9 +229,8 @@ our requests:
   venue queued for a venue crawl); unchanged setlists are skipped.
 - `pollstar`: the venue linked like `pollstar-add` (a new one is created and
   queued for our own Pollstar crawl), its events through
-  `pollstar.parse_events` / `ingest_event` with `extra.via = "musicscenemap"`.
-  Anyone can call user-requested-data, so these rows are only as good as its
-  checks; the via marker makes them easy to find and drop.
+  `pollstar.parse_events` / `ingest_event` with `extra.via = "musicscenemap"`
+  (where they came from).
 
 A row from a source without an ingest, or an unreadable one, is skipped; a
 failure is recorded as a failed `msm_requested` step and the run carries on.
