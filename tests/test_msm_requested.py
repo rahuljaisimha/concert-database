@@ -80,7 +80,7 @@ def test_pollstar_events_are_stored_like_the_pollstar_crawl_and_marked(conn, tmp
 def test_unknown_sources_and_unreadable_rows_are_skipped_not_fatal(conn):
     sl = night()[0]
     rows = [(1, "songkick", {}), (2, "setlistfm", {"id": "x"}), (3, "pollstar", {"venue": {"id": "9"}}),
-            (4, "setlistfm", sl)]
+            (4, "setlistfm", sl), (5, "pollstar_search", {"response": {"docs": []}})]
     stats = msm_requested.import_requested(conn, fetcher(rows), **QUIET)
-    assert (stats["unknown_source"], stats["unreadable"], stats["setlists"]) == (1, 2, 1)
-    assert conn.execute("SELECT value FROM meta WHERE key = ?", (msm_requested.CURSOR_KEY,)).fetchone()["value"] == "4"
+    assert (stats["unknown_source"], stats["unreadable"], stats["setlists"], stats["skipped"]) == (1, 2, 1, 1)
+    assert conn.execute("SELECT value FROM meta WHERE key = ?", (msm_requested.CURSOR_KEY,)).fetchone()["value"] == "5"
