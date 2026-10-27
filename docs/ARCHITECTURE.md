@@ -199,6 +199,42 @@ read that table (MusicSceneMap's migration 007), and:
 Nothing is written back to MusicSceneMap. A failure (Supabase unreachable) is
 recorded as a failed `misses` step and the run carries on.
 
+## User-requested data from MusicSceneMap (`concertdb/msm_requested.py`)
+
+MusicSceneMap fetches concert data from outside sources because a user asked
+for something, and keeps it in its Supabase table `user_requested_data`
+(`source, key, data, version, fetched_at, seq`; MusicSceneMap migration 009),
+one row per (source, key); `seq` moves forward when a row is added or its
+version changes. Nothing in it is about the user. Sources so far:
+
+- `setlistfm` (key: setlist id): every setlist MusicSceneMap's venue-search
+  function fetches (an artist's setlists in a city, then each venue's), as
+  setlist.fm returned it.
+- `pollstar` (key: Pollstar venue id): a venue's upcoming events fetched in
+  visitors' browsers by Discover, handed to MusicSceneMap's
+  user-requested-data function, which keeps only what we read (the venue's id,
+  name, city, state, location; each event's id, name, playDate, url,
+  isFestival and acts with their headliner flag).
+
+The second step of every `run` (or `concertdb msm-requested`) reads the rows
+past `meta.msm_requested_last_seq` (at most 5,000) with the same login as the
+misses and hands each to its source's ingest (`INGEST`), which uses that
+source's crawl code, so it's stored as if we had fetched it, without spending
+our requests:
+
+- `setlistfm`: `setlistfm.parse_setlist` / `is_known` / `ingest_setlist`
+  (source `setlistfm`, the setlist id as native_id, the bill re-inferred, the
+  venue queued for a venue crawl); unchanged setlists are skipped.
+- `pollstar`: the venue linked like `pollstar-add` (a new one is created and
+  queued for our own Pollstar crawl), its events through
+  `pollstar.parse_events` / `ingest_event` with `extra.via = "musicscenemap"`.
+  Anyone can call user-requested-data, so these rows are only as good as its
+  checks; the via marker makes them easy to find and drop.
+
+A row from a source without an ingest, or an unreadable one, is skipped; a
+failure is recorded as a failed `msm_requested` step and the run carries on.
+A new source: an ingest function in `INGEST`.
+
 ## Moving to Postgres later
 
 Tables are `STRICT`, dates are ISO-8601 text, booleans are 0/1 integers with

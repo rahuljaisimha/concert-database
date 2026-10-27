@@ -7,7 +7,8 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from . import backup, dashboard, db, export, ledger, misses, musicbrainz, review, runs, seed, smoke, state, status
+from . import (backup, dashboard, db, export, ledger, misses, msm_requested, musicbrainz, review, runs, seed, smoke,
+               state, status)
 from .http import Fetcher
 from .normalize import norm
 from .sources import gemini, jsonld, pollstar, setlistfm
@@ -186,6 +187,29 @@ def _misses_step(conn) -> None:
         print(f"search misses problem (the run carries on): {type(e).__name__}: {e}")
 
 
+def _msm_requested_step(conn) -> None:
+    """Store MusicSceneMap's user-requested data (concertdb/msm_requested.py). Never fails the run."""
+    url = msm_requested.configured()
+    if not url:
+        print(f"== MusicSceneMap user-requested data skipped (no {msm_requested.ENV})")
+        return
+    print("== MusicSceneMap user-requested data")
+    try:
+        print(runs.record(conn, "msm_requested", lambda: msm_requested.import_requested(
+            conn, lambda after: msm_requested.fetch_from_postgres(url, after))))
+    except Exception as e:      # noqa: BLE001 (recorded as a failed step; the crawl carries on)
+        print(f"MusicSceneMap user-requested data problem (the run carries on): {type(e).__name__}: {e}")
+
+
+def cmd_msm_requested(args):
+    url = msm_requested.configured()
+    if not url:
+        sys.exit(f"set {msm_requested.ENV} (a read-only login for MusicSceneMap's Supabase)")
+    conn = _conn(args)
+    print(runs.record(conn, "msm_requested", lambda: msm_requested.import_requested(
+        conn, lambda after: msm_requested.fetch_from_postgres(url, after))))
+
+
 def cmd_misses(args):
     url = misses.configured()
     if not url:
@@ -203,6 +227,7 @@ def cmd_run(args):
     """
     conn = _conn(args)
     _misses_step(conn)     # first, so the artists it prioritizes are crawled tonight
+    _msm_requested_step(conn)  # data MusicSceneMap already fetched (setlist.fm, Pollstar): no requests of ours
     print("== capture (schema.org pages)")
     print(runs.record(conn, "capture", lambda: jsonld.capture(conn, Fetcher(_data_dir(args), min_interval=1.0))))
     if os.environ.get("SETLISTFM_API_KEY"):
@@ -446,6 +471,10 @@ def build_parser() -> argparse.ArgumentParser:
                        f" (also the first step of `run`; needs ${misses.ENV})")
     s.add_argument("--max", type=int, default=misses.MAX_PER_RUN, help="new artists this run")
     s.set_defaults(fn=cmd_misses, locked="crawl")
+
+    s = sub.add_parser("msm-requested", help="store the data MusicSceneMap fetched because its users asked"
+                       f" (setlist.fm setlists, Pollstar events; also a step of `run`; needs ${msm_requested.ENV})")
+    s.set_defaults(fn=cmd_msm_requested, locked="crawl")
 
     s = sub.add_parser("run", help="one scheduled cycle: search misses, watched pages, setlist.fm, Pollstar,"
                        " backup")

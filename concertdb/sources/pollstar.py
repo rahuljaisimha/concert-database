@@ -150,7 +150,8 @@ def assign_roles(artists: list[dict]) -> list[tuple[str, str, float]]:
 
 # ----------------------------------------------------------------- ingest
 
-def ingest_event(conn: sqlite3.Connection, e: dict, venue_id: int) -> int:
+def ingest_event(conn: sqlite3.Connection, e: dict, venue_id: int, via: str | None = None) -> int:
+    """Store one event's bill. `via`: who fetched it, when not our own crawl (kept in each claim's extra)."""
     acts = [(ledger.get_or_create_artist(conn, name), role, conf)
             for name, role, conf in assign_roles(e["artists"])]
     show_id = ledger.find_or_create_show(conn, e["date"], venue_id, [a for a, _, _ in acts],
@@ -158,7 +159,8 @@ def ingest_event(conn: sqlite3.Connection, e: dict, venue_id: int) -> int:
     for pos, (aid, role, conf) in enumerate(acts):
         ledger.add_claim(conn, show_id, aid, SOURCE, e["id"], role=role, confidence=conf, position=pos,
                          url=e["url"], extra={"title": e["name"], "date": e["date"],
-                                              **({"festival": True} if e["is_festival"] else {})},
+                                              **({"festival": True} if e["is_festival"] else {}),
+                                              **({"via": via} if via else {})},
                          resolve=False)
     ledger.resolve_show(conn, show_id)  # is_festival: act count, or the claims' festival flag
     return show_id
