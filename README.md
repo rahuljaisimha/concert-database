@@ -47,6 +47,9 @@ set -a; . ./.env; set +a
 # ...and the ones MusicSceneMap users looked for and didn't find (also the first
 # step of every `run`; needs MSM_MISSES_DB_URL and: .venv/bin/pip install -e '.[misses]')
 .venv/bin/concertdb misses
+# store the data MusicSceneMap fetched because its users asked: setlist.fm setlists,
+# Pollstar events (also a step of every `run`)
+.venv/bin/concertdb msm-requested
 ```
 
 ## MusicBrainz data
