@@ -13,9 +13,15 @@ the user. Sources so far:
                                       (from Pollstar's venue search) and its
                                       upcoming events, fetched by MusicSceneMap's
                                       pollstar-events function for Discover
-  pollstar_search  key = a venue search  Pollstar's autocomplete response: that
-                                      function's cache of venue searches; nothing
-                                      to store here, skipped
+  pollstar_search  key = a venue or city search  Pollstar's autocomplete
+                                      response (pollstar-events' and pollstar-city's
+                                      cache of searches); nothing to store, skipped
+  pollstar_city  key = "<city id>:<page>" or "<city id>:<from>:<to>:<page>"
+                                      one page of Pollstar's events in a city
+                                      ({ page, pageSize, totalPages, totalEvents,
+                                      fromDate, toDate, events }, each event with
+                                      its full venue), fetched by MusicSceneMap's
+                                      pollstar-city function for Discover
 
 Each run reads the rows past the last `seq` it handled (meta
 `msm_requested_last_seq`) through the same read-only login as the search
@@ -30,6 +36,11 @@ without spending our requests:
              queued for our own Pollstar crawl), its events through
              pollstar.parse_events / ingest_event with extra.via
              "musicscenemap" (where they came from)
+  pollstar_city  the events grouped by venue, each venue linked by its Pollstar
+             id (a new one is created with the page's city, state, country and
+             coordinates, but not queued for our own crawl: a city's pages
+             already cover its venues), then stored like `pollstar`; events
+             without a venue are skipped (counted)
 
 A row from a source with no ingest here is skipped (counted); an unreadable
 row is skipped too. A new source: an ingest function in INGEST.
@@ -37,7 +48,7 @@ row is skipped too. A new source: an ingest function in INGEST.
 
 import sqlite3
 
-from . import db, misses
+from . import db, ledger, misses
 from .sources import pollstar, setlistfm
 
 ENV = misses.ENV
@@ -88,11 +99,65 @@ def _pollstar(conn: sqlite3.Connection, data: dict, stats: dict) -> None:
     stats["pollstar_events"] += len(events)
 
 
+def _city_venue(v: dict) -> dict:
+    """id, name, city, state, country, lat, lon of an event's venue on a Pollstar city page."""
+    addrs = [a for a in v.get("addresses") or [] if isinstance(a, dict)]
+    addr = next((a for a in addrs if a.get("type") == "Physical"), addrs[0] if addrs else {})
+    city = addr.get("city") or {}
+    location = pollstar._text(v.get("location")) or ""
+    return {
+        "id": str(v["id"]),
+        "name": pollstar._text(v["name"]).strip(),
+        "city": pollstar._text(city.get("name")) or location.split(",")[0].strip() or None,
+        "state": pollstar._text(city.get("stateAbbrev")) or None,
+        "country": pollstar._text(city.get("country") or (addr.get("country") or {}).get("Name")) or None,
+        "lat": addr.get("latitude"),
+        "lon": addr.get("longitude"),
+    }
+
+
+def _city_venue_id(conn: sqlite3.Connection, v: dict) -> tuple[int, bool]:
+    """Our venue for a city page's venue, linking it if new (not queued for a crawl). (venue id, newly linked)."""
+    row = conn.execute("SELECT venue_id FROM venue_source_ids WHERE source = ? AND native_id = ?",
+                       (pollstar.SOURCE, v["id"])).fetchone()
+    if row:
+        return row["venue_id"], False
+    venue_id = ledger.get_or_create_venue(conn, v["name"], v["city"], v["state"], v["country"], v["lat"], v["lon"],
+                                          source=pollstar.SOURCE, native_id=v["id"])
+    conn.execute("INSERT OR IGNORE INTO venue_source_ids (source, native_id, venue_id) VALUES (?, ?, ?)",
+                 (pollstar.SOURCE, v["id"], venue_id))
+    return venue_id, True
+
+
+def _pollstar_city(conn: sqlite3.Connection, data: dict, stats: dict) -> None:
+    events = data["events"]
+    if not isinstance(events, list):
+        raise TypeError("events is not a list")
+    by_venue: dict[str, tuple[dict, list]] = {}
+    without_venue = 0
+    for e in events:
+        v = e.get("venue") or {}
+        if not v.get("id") or not (pollstar._text(v.get("name")) or "").strip():
+            without_venue += 1
+            continue
+        by_venue.setdefault(str(v["id"]), (v, []))[1].append(e)
+    # Read the whole page before writing, so an unreadable one leaves nothing behind.
+    venues = [(_city_venue(v), pollstar.parse_events({"events": evs})) for v, evs in by_venue.values()]
+    for v, parsed in venues:
+        venue_id, new = _city_venue_id(conn, v)
+        stats["pollstar_new_venues"] += new
+        for e in parsed:
+            pollstar.ingest_event(conn, e, venue_id, via=VIA)
+        stats["pollstar_events"] += len(parsed)
+    stats["pollstar_city_pages"] += 1
+    stats["pollstar_events_without_venue"] += without_venue
+
+
 def _skip(conn: sqlite3.Connection, data: dict, stats: dict) -> None:
     stats["skipped"] += 1
 
 
-INGEST = {"setlistfm": _setlist, "pollstar": _pollstar, "pollstar_search": _skip}
+INGEST = {"setlistfm": _setlist, "pollstar": _pollstar, "pollstar_city": _pollstar_city, "pollstar_search": _skip}
 
 
 def _cursor(conn: sqlite3.Connection) -> int:
@@ -105,7 +170,8 @@ def import_requested(conn: sqlite3.Connection, fetch, log=print) -> dict:
     after = _cursor(conn)
     rows = fetch(after)
     stats = {"rows": len(rows), "setlists": 0, "setlists_unchanged": 0, "pollstar_venues": 0,
-             "pollstar_new_venues": 0, "pollstar_events": 0, "skipped": 0, "unknown_source": 0, "unreadable": 0}
+             "pollstar_new_venues": 0, "pollstar_events": 0, "pollstar_city_pages": 0,
+             "pollstar_events_without_venue": 0, "skipped": 0, "unknown_source": 0, "unreadable": 0}
     done_through = after
     db.begin_write(conn)
     for seq, source, data in rows:

@@ -14,6 +14,11 @@ add a test.
 - `pollstar_autocomplete_zebulon.json`, `pollstar_events_zebulon.json` — Pollstar
   autocomplete and venue-events responses, in the shape documented in
   MusicSceneMap's `src/api/pollstar.ts`.
+- `pollstar_city_page.json` — one page of Pollstar's events in a city (Berlin),
+  as MusicSceneMap's pollstar-city function stores it: two venues (one with a
+  mailing address listed before its physical one, one listed again without
+  addresses) and an event without a venue. Hand-written in the shape of a real
+  response seen on 2026-10-29, with the fields we don't read trimmed.
 - `calendar_page.html` — a venue calendar with several events in an
   `@graph`, one cancelled, one with a single performer and a "w/" title.
 - `mistletone_ty_segall.html` — **captured** (2026-10-19): the title and tour-dates
