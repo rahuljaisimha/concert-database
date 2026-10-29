@@ -215,8 +215,13 @@ version changes. Nothing in it is about the user. Sources so far:
   upcoming events, fetched by MusicSceneMap's pollstar-events function for its
   Discover page (Pollstar is asked server-side, at most once a day per venue,
   and every visitor is served from the cache).
-- `pollstar_search` (key: a venue search): that function's cache of Pollstar's
-  venue searches; skipped here.
+- `pollstar_city` (key: `<city id>:<page>` or `<city id>:<from>:<to>:<page>`):
+  one page (up to 100 events) of Pollstar's events in a city between two dates,
+  each event with its full venue (address, city, country, coordinates),
+  fetched by MusicSceneMap's pollstar-city function, which replaced
+  pollstar-events for Discover's concert search (same once-a-day cache).
+- `pollstar_search` (key: a venue or city search): those functions' cache of
+  Pollstar's autocomplete answers; skipped here.
 
 The second step of every `run` (or `concertdb msm-requested`) reads the rows
 past `meta.msm_requested_last_seq` (at most 5,000) with the same login as the
@@ -231,6 +236,12 @@ our requests:
   queued for our own Pollstar crawl), its events through
   `pollstar.parse_events` / `ingest_event` with `extra.via = "musicscenemap"`
   (where they came from).
+- `pollstar_city`: the events grouped by venue; each venue is found by its
+  Pollstar id, or created with the page's city, state, country and coordinates
+  (taken from its physical address) and linked, but not queued for our own
+  Pollstar crawl, since the city pages MusicSceneMap's users ask for already
+  cover it. Then its events are stored like `pollstar`. Events without a venue
+  are skipped (counted).
 
 A row from a source without an ingest, or an unreadable one, is skipped; a
 failure is recorded as a failed `msm_requested` step and the run carries on.

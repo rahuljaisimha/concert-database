@@ -28,6 +28,11 @@ def zebulon_events():
     return {"venue": ZEBULON, **json.loads(fixture_text("pollstar_events_zebulon.json"))}
 
 
+def berlin_page():
+    """A page of Pollstar's events in a city: two venues, one event without a venue."""
+    return json.loads(fixture_text("pollstar_city_page.json"))
+
+
 def claims(conn, source):
     q = ("SELECT native_id, role, confidence, position, extra FROM claims WHERE source = ?"
          " ORDER BY native_id, position, artist_id")
@@ -77,10 +82,53 @@ def test_pollstar_events_are_stored_like_the_pollstar_crawl_and_marked(conn, tmp
     assert again["pollstar_new_venues"] == 0
 
 
+def test_pollstar_city_pages_are_stored_like_the_pollstar_crawl_and_marked(conn, tmp_path):
+    page = berlin_page()
+    stats = msm_requested.import_requested(conn, fetcher([(1, "pollstar_city", page)]), **QUIET)
+    assert (stats["pollstar_city_pages"], stats["pollstar_new_venues"], stats["pollstar_events"],
+            stats["pollstar_events_without_venue"], stats["unreadable"]) == (1, 2, 3, 1, 0)
+
+    # The same claims as crawling each venue's events page, marked as from MusicSceneMap.
+    crawl = db.connect(tmp_path / "crawl.sqlite")
+    for vid, name in (("272931", "Uber Arena"), ("280001", "Badehaus")):
+        venue_id = pollstar._link(crawl, {"id": vid, "name": name, "city": "Berlin", "state": None})
+        evs = [e for e in page["events"] if (e.get("venue") or {}).get("id") == int(vid)]
+        for e in pollstar.parse_events({"events": evs}):
+            pollstar.ingest_event(crawl, e, venue_id)
+    crawl.commit()
+    ours, theirs = claims(conn, "pollstar"), claims(crawl, "pollstar")
+    assert [json.loads(r.pop("extra")) for r in ours] == [dict(json.loads(r.pop("extra")), via="musicscenemap")
+                                                         for r in theirs]
+    assert ours == theirs
+
+    # Venues get the page's city, country and coordinates (the physical address), and aren't queued for a crawl.
+    q = ("SELECT v.name, v.city, v.state, v.country, v.lat, v.lon FROM venues v"
+         " JOIN venue_source_ids s ON s.venue_id = v.id WHERE s.source = 'pollstar' ORDER BY s.native_id")
+    assert [tuple(r) for r in conn.execute(q)] == [("Uber Arena", "Berlin", None, "Germany", 52.5053, 13.4432),
+                                                   ("Badehaus", "Berlin", None, "Germany", 52.5079, 13.4537)]
+    assert not conn.execute("SELECT 1 FROM crawl_state WHERE source = 'pollstar'").fetchone()
+
+    # The page again (a refetch): nothing new.
+    n = conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
+    again = msm_requested.import_requested(conn, fetcher([(2, "pollstar_city", page)]), **QUIET)
+    assert again["pollstar_new_venues"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == n
+
+
+def test_city_page_venues_reuse_venues_we_already_have(conn):
+    msm_requested.import_requested(conn, fetcher([(1, "pollstar", zebulon_events())]), **QUIET)
+    event = dict(berlin_page()["events"][2], venue={"id": 501234, "name": "Zebulon", "location": "Los Angeles, CA"})
+    stats = msm_requested.import_requested(conn, fetcher([(2, "pollstar_city", {"events": [event]})]), **QUIET)
+    assert (stats["pollstar_new_venues"], stats["pollstar_events"]) == (0, 1)
+    assert conn.execute("SELECT COUNT(*) FROM venues").fetchone()[0] == 1
+
+
 def test_unknown_sources_and_unreadable_rows_are_skipped_not_fatal(conn):
     sl = night()[0]
     rows = [(1, "songkick", {}), (2, "setlistfm", {"id": "x"}), (3, "pollstar", {"venue": {"id": "9"}}),
-            (4, "setlistfm", sl), (5, "pollstar_search", {"response": {"docs": []}})]
+            (4, "setlistfm", sl), (5, "pollstar_search", {"response": {"docs": []}}),
+            (6, "pollstar_city", {"page": 0}), (7, "pollstar_city", {"events": [{"venue": {"id": 1, "name": "X"}, "playDate": "2026-11-01"}]})]
     stats = msm_requested.import_requested(conn, fetcher(rows), **QUIET)
-    assert (stats["unknown_source"], stats["unreadable"], stats["setlists"], stats["skipped"]) == (1, 2, 1, 1)
-    assert conn.execute("SELECT value FROM meta WHERE key = ?", (msm_requested.CURSOR_KEY,)).fetchone()["value"] == "5"
+    assert (stats["unknown_source"], stats["unreadable"], stats["setlists"], stats["skipped"]) == (1, 4, 1, 1)
+    assert conn.execute("SELECT value FROM meta WHERE key = ?", (msm_requested.CURSOR_KEY,)).fetchone()["value"] == "7"
+    assert conn.execute("SELECT COUNT(*) FROM venues").fetchone()[0] == 1   # the setlist's; row 7 (an event without an id) left nothing
