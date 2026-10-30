@@ -274,9 +274,8 @@ about, on a schedule, with tight limits:
   take 20% off the interval, down to the floor
 - the process ends as soon as a wait would be longer than 5 minutes
   (`MAX_WAIT_SECONDS`): a fifth pushback in a row, or a `Retry-After` over
-  300 s. That also pauses Pollstar for every process, so a block isn't
-  made worse: 12 hours, doubling each time it happens again (up to a week),
-  back to 12 hours after a run with 300 clean requests
+  300 s. The next scheduled run tries again, starting at the slower pace this
+  one reached
 - the due list is re-read every 200 units and newly found venues are queued
   for lookup every 30 minutes, so a run lasting hours picks up what setlist.fm
   found that day

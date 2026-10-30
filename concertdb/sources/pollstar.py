@@ -17,9 +17,8 @@ two nights running, so the pace adapts and is remembered between runs:
     MAX_INTERVAL), waits (Retry-After, else BACKOFF_SECONDS: 30 s, 60 s, 120 s,
     300 s) and retries; SPEEDUP_AFTER clean requests in a row take 20% off it
   - a wait longer than MAX_WAIT_SECONDS (5 min: the fifth pushback in a row,
-    or a longer Retry-After) ends the process and pauses Pollstar for every
-    process: 12 h, doubling each time it happens again (up to a week), back to
-    12 h after a run with SPEEDUP_AFTER clean requests
+    or a longer Retry-After) ends the process; the next scheduled run tries
+    again, at the slower pace this one reached
   - a venue's name is looked up once; the match (or no-match) is stored and
     never looked up again for a year
   - each venue's event list is rechecked every 3 days, backing off to 14 days
@@ -60,13 +59,11 @@ SPEEDUP = 0.8               # interval x this after SPEEDUP_AFTER clean requests
 SPEEDUP_AFTER = 300
 # Pollstar has no published limit, so treat these as "slow down": wait, slow
 # down, retry. When the next wait (the backoff, Retry-After, or the pace between
-# requests) would be longer than MAX_WAIT_SECONDS, stop (and pause) rather than
-# risk the IP being blocked for longer.
+# requests) would be longer than MAX_WAIT_SECONDS, stop rather than risk the IP
+# being blocked for longer.
 PUSHBACK_STATUSES = (403, 429, 503)
 BACKOFF_SECONDS = (30, 60, 120, 300)
 MAX_WAIT_SECONDS = 300      # 5 min: any longer wait ends the process
-PAUSE_HOURS = 12            # after being stopped, no Pollstar requests from any process
-MAX_PAUSE_HOURS = 7 * 24
 sleep = time.sleep          # replaced in tests
 DUE_BATCH = 200             # re-read what's due this often, so a long run sees new work
 REQUEUE_SECONDS = 1800      # look for newly found venues to resolve every 30 min
@@ -247,14 +244,6 @@ def _link(conn: sqlite3.Connection, v: dict, venue_id: int | None = None) -> int
     return venue_id
 
 
-def paused_until(conn: sqlite3.Connection) -> str | None:
-    """The pause end time (ISO, UTC) if Pollstar is paused now, else None."""
-    row = conn.execute("SELECT value FROM meta WHERE key = 'pollstar_paused_until'").fetchone()
-    if row and row["value"] > state._iso(state._now()):
-        return row["value"]
-    return None
-
-
 def _meta(conn: sqlite3.Connection, key: str) -> str | None:
     row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else None
@@ -273,36 +262,14 @@ def current_interval(conn: sqlite3.Connection) -> float:
         return POLL_INTERVAL
 
 
-def pause_hours(conn: sqlite3.Connection) -> float:
-    try:
-        return float(_meta(conn, "pollstar_pause_hours") or PAUSE_HOURS)
-    except ValueError:
-        return PAUSE_HOURS
-
-
-def pause(conn: sqlite3.Connection, hours: float) -> str:
-    """Pause Pollstar for every process; the next pause (if it happens again) is twice as long."""
-    until = state._iso(state._now() + timedelta(hours=hours))
-    db.begin_write(conn)
-    _set_meta(conn, "pollstar_paused_until", until)
-    _set_meta(conn, "pollstar_pause_hours", min(MAX_PAUSE_HOURS, hours * 2))
-    return until
-
-
 class Blocked(Exception):
-    """Pollstar pushed back several times in a row: stop for the day."""
+    """Pollstar pushed back several times in a row: end this run."""
 
 
 def capture(conn: sqlite3.Connection, client: Client, max_requests: int = DAILY_LIMIT, log=print) -> dict:
     """Work through due lookups and event lists until the budget or the work runs out."""
     stats = {"requests": 0, "resolved": 0, "venues": 0, "unchanged": 0, "events": 0,
              "pushback": 0, "_streak": 0, "_clean": 0}
-    until = paused_until(conn)
-    if until:
-        log(f"pollstar: paused until {until} after repeated pushback; skipping")
-        stats.pop("_streak"), stats.pop("_clean")
-        stats["paused_until"] = until
-        return stats
     adaptive = hasattr(client, "set_interval")
     if adaptive:
         client.set_interval(current_interval(conn))
@@ -376,16 +343,9 @@ def capture(conn: sqlite3.Connection, client: Client, max_requests: int = DAILY_
                     _resolve(conn, get, client, row, int(ident), stats, log)
                 conn.commit()
     except Blocked as exc:
-        until = pause(conn, pause_hours(conn))
-        log(f"pollstar: stopping ({exc}); paused until {until}")
+        log(f"pollstar: stopping ({exc}); the next run tries again")
         conn.commit()
         stats["blocked"] = str(exc)[:200]
-        stats["paused_until"] = until
-    else:
-        if stats["_clean"] >= SPEEDUP_AFTER and _meta(conn, "pollstar_pause_hours"):
-            db.begin_write(conn)
-            conn.execute("DELETE FROM meta WHERE key = 'pollstar_pause_hours'")   # a good run: back to 12 h
-            conn.commit()
     stats.pop("_streak", None), stats.pop("_clean", None)
     return stats
 

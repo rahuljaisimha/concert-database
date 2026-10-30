@@ -577,8 +577,7 @@ const DATA = /*DATA*/null;
   c = card(g6, "Pollstar and backup", "");
   const kv = el("dl", {class: "kv"}, c);
   const ps = r.pollstar, bk = r.backup;
-  [["Pollstar pace", `${ps.interval.toFixed(1)} s between requests`], ["Pollstar paused", ps.paused_until ? "until " + when(ps.paused_until) : "no"],
-   ["Next pause would be", `${ps.next_pause_hours} h`], ["Pollstar requests today", fmt(ps.requests_today)],
+  [["Pollstar pace", `${ps.interval.toFixed(1)} s between requests`], ["Pollstar requests today", fmt(ps.requests_today)],
    ["Last good backup", bk.at ? `${when(bk.at)} (${bk.hours_ago} h ago)` : "none recorded"],
    ["Backup size", bk.bytes ? compact(bk.bytes) + "B" : "–"], ["Uploaded to R2", bk.uploaded == null ? "–" : bk.uploaded ? "yes" : "no"]]
     .forEach(([k, v]) => { el("dt", {}, kv, k); el("dd", {}, kv, v); });
