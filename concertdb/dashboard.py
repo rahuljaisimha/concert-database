@@ -335,8 +335,9 @@ def run_metrics(conn: sqlite3.Connection) -> dict:
                        "days_left": round(bal[-1]["balance"] / per_day) if bal and per_day else None,
                        "cap_per_run": gemini.CONTEXTDEV_MAX_CREDITS}
 
-    r["pollstar"] = {"interval": pollstar.current_interval(conn), "paused_until": pollstar.paused_until(conn),
-                     "next_pause_hours": pollstar.pause_hours(conn),
+    last_ps = next((x for x in recent if x["step"] == "pollstar" and x["finished_at"]), None)
+    r["pollstar"] = {"interval": pollstar.current_interval(conn),
+                     "blocked_at": last_ps["finished_at"] if last_ps and last_ps["stats"].get("blocked") else None,
                      "requests_today": state.requests_today(conn, "pollstar")}
 
     b = next((x for x in recent if x["step"] == "backup" and x["ok"]), None)
@@ -392,8 +393,9 @@ def alerts(d: dict, r: dict) -> list[dict]:
                 x.get("running") is None
                 and _now() - datetime.fromisoformat(x["started_at"]) > timedelta(hours=12))):
             out.append({"level": "serious", "text": f"Last {step} run stopped without finishing (killed?)"})
-    if r["pollstar"]["paused_until"]:
-        out.append({"level": "warning", "text": "Pollstar paused until", "at": r["pollstar"]["paused_until"]})
+    if r["pollstar"]["blocked_at"]:
+        out.append({"level": "warning", "text": "Last Pollstar run ended after repeated pushback",
+                    "at": r["pollstar"]["blocked_at"]})
     cd = r["contextdev"]
     if cd["days_left"] is not None and cd["days_left"] < 14:
         out.append({"level": "warning", "text": f"context.dev credits run out in about {cd['days_left']} days"})

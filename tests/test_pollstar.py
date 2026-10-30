@@ -139,20 +139,19 @@ def test_network_error_is_pushback(conn, monkeypatch):
     assert stats["pushback"] == 1 and stats["events"] == 3
 
 
-def test_repeated_pushback_pauses_all_processes(conn, monkeypatch):
+def test_repeated_pushback_ends_the_run_without_pausing(conn, monkeypatch):
     monkeypatch.setattr(pollstar, "sleep", lambda s: None)
     _watch_zebulon(conn)
     client = SequenceClient([status(403)] * 20)
     lines = []
     stats = pollstar.capture(conn, client, log=lines.append)
     assert stats["requests"] == len(pollstar.BACKOFF_SECONDS) + 1
-    assert pollstar.paused_until(conn)
-    assert "paused until" in lines[-1]
-    # Another run (e.g. `concertdb run` after the Pollstar process stopped) sends nothing.
+    assert stats["blocked"] and "paused_until" not in stats
+    assert "the next run tries again" in lines[-1]
+    # The next run asks again (and backs off again if it's still pushed back).
     conn.execute("UPDATE crawl_state SET next_due = '2000-01-01'")
     client.calls.clear()
-    assert pollstar.capture(conn, client, log=lambda *_: None)["requests"] == 0
-    assert client.calls == []
+    assert pollstar.capture(conn, client, log=lambda *_: None)["requests"] == len(pollstar.BACKOFF_SECONDS) + 1
 
 
 def test_long_run_rereads_due_work(conn, monkeypatch):
@@ -312,32 +311,6 @@ def test_clean_requests_speed_back_up_to_the_floor(conn, monkeypatch):
     assert pollstar.current_interval(conn) == pollstar.POLL_INTERVAL
 
 
-def test_pauses_double_when_blocked_again(conn, monkeypatch):
-    monkeypatch.setattr(pollstar, "sleep", lambda s: None)
-    _watch_zebulon(conn)
-    from datetime import datetime, timezone
-
-    def hours_paused():
-        until = datetime.fromisoformat(pollstar.paused_until(conn))
-        return round((until - datetime.now(timezone.utc)).total_seconds() / 3600)
-
-    pollstar.capture(conn, PacedClient([status(403)] * 20), log=lambda *_: None)
-    assert hours_paused() == pollstar.PAUSE_HOURS
-    pollstar._set_meta(conn, "pollstar_paused_until", "2000-01-01T00:00:00+00:00")   # the pause ran out
-    conn.execute("UPDATE crawl_state SET next_due = '2000-01-01'")
-    conn.commit()
-    pollstar.capture(conn, PacedClient([status(403)] * 20), log=lambda *_: None)
-    assert hours_paused() == pollstar.PAUSE_HOURS * 2
-    assert pollstar.pause_hours(conn) == pollstar.PAUSE_HOURS * 4
-    # A good run resets it.
-    monkeypatch.setattr(pollstar, "SPEEDUP_AFTER", 1)
-    pollstar._set_meta(conn, "pollstar_paused_until", "2000-01-01T00:00:00+00:00")
-    conn.execute("UPDATE crawl_state SET next_due = '2000-01-01'")
-    conn.commit()
-    pollstar.capture(conn, PacedClient([EV]), log=lambda *_: None)
-    assert pollstar.pause_hours(conn) == pollstar.PAUSE_HOURS
-
-
 def test_a_wait_over_five_minutes_ends_the_process(conn, monkeypatch):
     waits = []
     monkeypatch.setattr(pollstar, "sleep", waits.append)
@@ -347,7 +320,7 @@ def test_a_wait_over_five_minutes_ends_the_process(conn, monkeypatch):
     lines = []
     stats = pollstar.capture(conn, SequenceClient([status(503), long_retry, EV]), log=lines.append)
     assert waits == [pollstar.BACKOFF_SECONDS[0]] and stats["requests"] == 2      # no 301 s wait
-    assert "over 300s" in stats["blocked"] and pollstar.paused_until(conn)
+    assert "over 300s" in stats["blocked"]
 
 
 def test_the_backoff_never_waits_more_than_five_minutes(conn, monkeypatch):
