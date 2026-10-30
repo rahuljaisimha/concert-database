@@ -45,6 +45,8 @@ can't hide spent quota.
     apart. It scrapes the search engines it is set to use (deploy/searxng-
     settings.yml), which may block it: after SEARXNG_MAX_FAILS searches in a
     row with no results and engines reported down, the run moves to Firecrawl.
+    With Firecrawl off, a failed search is asked again after SEARXNG_RETRY_WAIT
+    (Brave suspends us for 3 minutes), until SEARXNG_MAX_FAILS switch it off.
   - Firecrawl (usage source "firecrawl", in credits; a 10-result search costs
     2): searches SEARCH_INTERVAL apart (free plan: 10 a minute). HTTP 402 (out
     of credits) switches it off for the run and hands the search back to the
@@ -95,6 +97,7 @@ SEARCH_ORDER = ("contextdev", "searxng")   # then Firecrawl; SEARCH_ORDER in .en
 SEARXNG_INTERVAL = 15.0     # between SearXNG searches: Google flagged "unusual traffic" after ~100
                             # searches a few seconds apart in an afternoon
 SEARXNG_MAX_FAILS = 3       # empty searches in a row (engines down) before falling back to Firecrawl
+SEARXNG_RETRY_WAIT = 180    # with nothing else left, a failed search waits out Brave's suspension (180 s)
 MODEL = "gemini-3.5-flash-lite"
 # Tried in order, each with its own free daily quota (GEMINI_MODELS in .env changes the list;
 # GEMINI_MODEL or --model uses just that one). gemini-3.1-flash-lite found the same openers as
@@ -833,6 +836,7 @@ class Run:
 
     def search(self, query: str) -> list[dict]:
         """The first search in self.order that answers (context.dev, SearXNG), else Firecrawl."""
+        searxng_failed = False
         for backend in self.order:
             results = None
             if backend == "contextdev" and self.contextdev_on \
@@ -844,9 +848,16 @@ class Run:
                 results = self.search_contextdev(query)
             elif backend == "searxng" and self.searxng_on:
                 results = self.search_searxng(query)
+                searxng_failed = results is None
             if results is not None:
                 return results
         if not self.firecrawl_on:
+            if searxng_failed and self.searxng_on:
+                # Nothing else to ask, and SearXNG isn't off yet: its engines are
+                # usually just suspended for a few minutes. Wait that out and ask again.
+                self.log(f"  searxng: waiting {SEARXNG_RETRY_WAIT}s, then asking again")
+                self.sleep(SEARXNG_RETRY_WAIT)
+                return self.search(query)
             raise Stop("no search left: " + self.searches_off())
         if self.credits_left() < SEARCH_CREDITS:
             raise Stop("budget spent")
