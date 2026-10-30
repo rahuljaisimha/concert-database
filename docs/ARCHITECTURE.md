@@ -398,7 +398,10 @@ sent.
   and uncapped, but Google flagged "unusual traffic" after ~100 searches a few
   seconds apart in one afternoon and Brave suspends for 3 minutes after a few
   in a row, so searches go 15 s apart, and after 3 searches in a row with no
-  results and engines down the run moves to Firecrawl. Scraping search engines
+  results and engines down the run moves to Firecrawl. When nothing else is
+  left (Firecrawl out of credits, context.dev at its cap), a failed search is
+  asked again after 3 minutes, Brave's suspension, until 3 in a row switch
+  SearXNG off and end the run. Scraping search engines
   is against their terms; Firecrawl and Gemini are the sanctioned path.
 - Firecrawl (`usage` source `firecrawl`, in credits; a 10-result search costs
   2; the free plan has 1,000 a month): searches 6.5 s apart (free plan: 10 a

@@ -782,11 +782,33 @@ def test_out_of_firecrawl_credits_hands_the_search_back_to_searxng(conn):
     assert stats["specific"] == 3
 
 
-def test_no_search_left_ends_the_run(conn):
+def test_no_search_left_ends_the_run(conn, monkeypatch):
+    waits = []
+    monkeypatch.setattr(gemini.time, "sleep", waits.append)
     ty_tour(conn)
     client = SearxClient([], searx={"Ty Segall": searx(down=("google cse",))}, firecrawl=False)
     stats = gemini.ask(conn, client, **QUIET)
     assert stats["stopped"].startswith("no search left") and len(state.due(conn, "gemini")) == 3
+    # The same query asked SEARXNG_MAX_FAILS times, waiting in between, before SearXNG is off
+    assert len(client.searx_queries) == gemini.SEARXNG_MAX_FAILS and len(set(client.searx_queries)) == 1
+    assert waits.count(gemini.SEARXNG_RETRY_WAIT) == gemini.SEARXNG_MAX_FAILS - 1
+
+
+def test_with_only_searxng_left_a_suspended_engine_is_waited_out(conn, monkeypatch):
+    # Firecrawl is out of credits and context.dev off: one empty SearXNG answer
+    # (Brave suspended us) doesn't end the run; the same query is asked again after a wait.
+    waits = []
+    monkeypatch.setattr(gemini.time, "sleep", waits.append)
+    ty_tour(conn)
+    c = ty_client()
+    client = SearxClient(c.answers, searx={
+        "tour support": [searx(down=("brave",)), searx((TOUR_URL, "Ty Segall Australian Tour", "Earth Tongue on all dates"))],
+        '"The Metro" Sydney': searx((METRO_URL, "Ty Segall - The Metro", "Monday 2 March"))},
+        pages=c.pages, firecrawl=False)
+    stats = gemini.ask(conn, client, **QUIET)
+    assert stats["stopped"] is None and stats["specific"] == 3
+    assert client.searx_queries[0] == client.searx_queries[1]
+    assert waits.count(gemini.SEARXNG_RETRY_WAIT) == 1
 
 
 def test_client_needs_some_search(tmp_path):
